@@ -35,6 +35,9 @@ class NodeConfig:
     finetuning_enabled: bool = os.getenv("FINETUNING_ENABLED", "false").lower() == "true"
     lora_rank: int = int(os.getenv("LORA_RANK", "8"))
 
+    # Storage (Lighthouse IPFS+Filecoin)
+    lighthouse_api_key: str = os.getenv("LIGHTHOUSE_API_KEY", "")
+
     # Pay.sh
     paysh_api_key: str = os.getenv("PAYSH_API_KEY", "")
     paysh_webhook_secret: str = os.getenv("PAYSH_WEBHOOK_SECRET", "")
@@ -42,3 +45,10 @@ class NodeConfig:
     # Operational
     max_concurrent_jobs: int = int(os.getenv("MAX_CONCURRENT_JOBS", "4"))
     job_poll_interval_seconds: float = float(os.getenv("JOB_POLL_INTERVAL", "2.0"))
+
+    def wallet_private_key_bytes(self) -> bytes:
+        """Return the 32-byte Ed25519 seed from the Solana wallet JSON file."""
+        import json
+
+        key_list = json.loads(Path(self.wallet_path).read_text())
+        return bytes(key_list[:32])

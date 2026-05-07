@@ -32,6 +32,7 @@ class OpenJob:
     client: str
     model_id: bytes
     prompt_hash: bytes
+    prompt_cid: str  # IPFS CID of the encrypted prompt blob
     max_tokens: int
     payment_amount: int
     deadline: int
@@ -93,6 +94,7 @@ class BlockchainClient:
                     client=str(j.account.client),
                     model_id=bytes(j.account.model_id),
                     prompt_hash=bytes(j.account.prompt_hash),
+                    prompt_cid=j.account.prompt_cid,
                     max_tokens=j.account.max_tokens,
                     payment_amount=j.account.payment_amount,
                     deadline=j.account.deadline,

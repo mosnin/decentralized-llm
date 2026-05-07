@@ -17,12 +17,12 @@ import hashlib
 import logging
 import signal
 
-import torch
-
 from .blockchain import BlockchainClient, OpenJob
 from .config import NodeConfig
+from .encryption import decrypt_prompt
 from .p2p import P2PLayer
 from .shard_manager import ShardManager
+from .storage import StorageClient
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,6 +36,7 @@ class Node:
         self.config = config or NodeConfig()
         self.shard_mgr = ShardManager(self.config)
         self.blockchain = BlockchainClient(self.config)
+        self.storage: StorageClient | None = None
         self.p2p: P2PLayer | None = None
         self._running = False
         self._active_jobs: dict[int, asyncio.Task] = {}
@@ -52,6 +53,9 @@ class Node:
         )
 
         self.shard_mgr.load()
+
+        if self.config.lighthouse_api_key:
+            self.storage = StorageClient(api_key=self.config.lighthouse_api_key)
 
         await self.blockchain.connect()
         await self._ensure_registered()
@@ -145,14 +149,14 @@ class Node:
             # Last shard: generate tokens autoregressively
             return await loop.run_in_executor(None, self._generate, hidden, job.max_tokens)
 
-    def _tokenize(self, prompt: str) -> torch.Tensor:
+    def _tokenize(self, prompt: str):
         tokens = self.shard_mgr.tokenizer(
             prompt, return_tensors="pt", truncation=True, max_length=2048
         )
         device = next(self.shard_mgr.model.parameters()).device
         return tokens["input_ids"].to(device)
 
-    def _generate(self, hidden: torch.Tensor, max_new_tokens: int) -> str:
+    def _generate(self, hidden, max_new_tokens: int) -> str:
         logits = self.shard_mgr.decode(hidden)
         # Greedy decoding for simplicity; swap for sampling/beam search as needed
         generated = logits[:, -1, :].argmax(dim=-1, keepdim=True)
@@ -176,25 +180,70 @@ class Node:
 
     async def _fetch_prompt(self, job: OpenJob) -> str:
         """
-        Retrieve the actual prompt for a job. The client delivers it either:
-          a) directly to the claiming node over an encrypted P2P channel, or
-          b) as an encrypted blob stored on IPFS (CID derived from prompt_hash).
-        """
-        # Placeholder: in production, open a noise-encrypted channel to the client
-        raise NotImplementedError("Prompt delivery not yet implemented")
+        Retrieve and decrypt the prompt for a job.
 
-    async def _receive_activations(self, job_id: int) -> torch.Tensor:
-        """Receive activations streamed from the previous shard."""
-        raise NotImplementedError("Activation streaming not yet implemented")
+        The client uploads the ECIES-encrypted blob to IPFS at job submission
+        time and stores the CID in the on-chain job account.  We download the
+        blob, decrypt it with our wallet private key, and verify the SHA-256
+        matches the on-chain prompt_hash commitment.
+        """
+        if self.storage is None:
+            raise RuntimeError(
+                "LIGHTHOUSE_API_KEY not set — cannot fetch encrypted prompt from IPFS"
+            )
+
+        blob = await self.storage.download(job.prompt_cid)
+
+        wallet_seed = self.config.wallet_private_key_bytes()
+        return decrypt_prompt(blob, wallet_seed, job.prompt_hash)
+
+    async def _receive_activations(self, job_id: int):
+        """
+        Receive activations streamed from the previous shard via the DHT.
+
+        Middle shards block here until shard (index-1) pushes the tensor
+        into the DHT under key "activations.<job_id>.<shard_index>".
+        """
+        if self.p2p is None or self.p2p.dht is None:
+            raise RuntimeError("P2P layer not started")
+
+        import asyncio
+
+        key = f"activations.{job_id}.{self.config.shard_index}"
+        deadline = asyncio.get_event_loop().time() + 300  # 5-minute timeout
+
+        while asyncio.get_event_loop().time() < deadline:
+            result = await asyncio.get_event_loop().run_in_executor(None, self.p2p.dht.get, key)
+            if result is not None:
+                import torch
+
+                tensor_bytes = result["tensor"]
+                shape = result["shape"]
+                dtype_str = result["dtype"]
+                dtype = getattr(torch, dtype_str)
+                return torch.frombuffer(bytearray(tensor_bytes), dtype=dtype).reshape(shape)
+            await asyncio.sleep(0.5)
+
+        raise TimeoutError(f"Timed out waiting for activations for job {job_id}")
 
     async def _upload_result(self, job_id: int, result_text: str) -> str:
-        """Upload result to IPFS/Arweave and return the CID."""
-        # Placeholder: integrate with web3.storage, nft.storage, or Arweave SDK
-        content_hash = hashlib.sha256(result_text.encode()).hexdigest()
-        logger.info("Result for job %d would be uploaded (hash: %s)", job_id, content_hash[:16])
-        return f"bafkreifake{content_hash[:32]}"  # replace with real IPFS upload
+        """Upload inference result to Lighthouse (IPFS+Filecoin) and return the CID."""
+        if self.storage is None:
+            content_hash = hashlib.sha256(result_text.encode()).hexdigest()
+            logger.warning(
+                "No storage client — result for job %d not persisted (hash: %s)",
+                job_id,
+                content_hash[:16],
+            )
+            return f"bafkrei{content_hash[:32]}"  # deterministic placeholder
+
+        cid = await self.storage.upload_result(result_text, job_id)
+        logger.info("Job %d result uploaded: %s", job_id, cid)
+        return cid
 
     async def _ensure_registered(self) -> None:
+        import torch
+
         model_id = self._model_id_bytes()
         gpu_count = torch.cuda.device_count() or 1
         vram_gb = 0

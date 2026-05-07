@@ -13,9 +13,6 @@ Shard N-1 additionally runs the LM head / final layer norm.
 import logging
 from pathlib import Path
 
-import torch
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
-
 logger = logging.getLogger(__name__)
 
 
@@ -28,6 +25,9 @@ class ShardManager:
 
     def load(self) -> None:
         """Download (if needed) and load this node's model shard into GPU memory."""
+        import torch
+        from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+
         cache_dir = Path(self.config.cache_dir)
         cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -52,8 +52,8 @@ class ShardManager:
         torch_dtype = dtype_map.get(self.config.dtype, torch.float16)
 
         # Load full model weights then extract the layers we need.
-        # A production system would use a custom loader that only fetches the
-        # relevant weight shards from a distributed store (e.g. IPFS/Arweave).
+        # ExLlamaV2 backend (USE_EXLLAMA=1) loads only the assigned layer range
+        # natively, avoiding peak memory = full model on CPU.
         full_model = AutoModelForCausalLM.from_pretrained(
             self.config.model_name,
             cache_dir=cache_dir,
@@ -61,7 +61,7 @@ class ShardManager:
             device_map="cpu",  # load to CPU first, then slice
         )
 
-        self.model = self._extract_shard(full_model)
+        self.model = self._extract_shard(full_model, torch)
         del full_model  # free the rest of the weights
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -75,23 +75,29 @@ class ShardManager:
 
         logger.info("Shard %d loaded on %s", self.config.shard_index, device)
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden_states):
         """
         Run a forward pass through this shard's layers.
 
         Input/output: float tensor of shape (batch, seq_len, hidden_dim)
         """
+        import torch
+
         with torch.no_grad():
             return self.model(hidden_states)
 
-    def embed(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed(self, input_ids):
         """Embed token IDs → hidden states. Only valid on shard 0."""
+        import torch
+
         assert self.config.shard_index == 0, "embed() only valid on shard 0"
         with torch.no_grad():
             return self.model.embed(input_ids)
 
-    def decode(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def decode(self, hidden_states):
         """Run LM head to get logits. Only valid on the last shard."""
+        import torch
+
         assert self.config.shard_index == self.config.num_shards - 1
         with torch.no_grad():
             return self.model.decode(hidden_states)
@@ -113,31 +119,31 @@ class ShardManager:
                 return getattr(cfg, attr)
         raise ValueError(f"Cannot determine layer count from config: {cfg}")
 
-    def _extract_shard(self, full_model):
-        """
-        Wraps the model's transformer blocks for the assigned slice.
-
-        This is architecture-specific; we detect the block list name and
-        return a thin wrapper that only holds those blocks.
-        """
+    def _extract_shard(self, full_model, torch):
         start, end = self.layer_slice
         is_first = self.config.shard_index == 0
         is_last = self.config.shard_index == self.config.num_shards - 1
+        return _ShardWrapper(full_model, start, end, is_first, is_last, torch)
 
-        return _ShardWrapper(full_model, start, end, is_first, is_last)
 
-
-class _ShardWrapper(torch.nn.Module):
+class _ShardWrapper:
     """Holds a slice of transformer blocks plus optional embed/decode layers."""
 
-    def __init__(self, full_model, start: int, end: int, is_first: bool, is_last: bool):
-        super().__init__()
+    def __init__(self, full_model, start: int, end: int, is_first: bool, is_last: bool, torch):
+        import torch as _torch  # noqa: PLC0415
+
+        self._torch = _torch
         self.is_first = is_first
         self.is_last = is_last
 
+        # Wrap as a proper nn.Module so .to(device) / .eval() work
+        class _Wrapper(_torch.nn.Module):
+            pass
+
+        wrapper = _Wrapper()
+
         model = full_model.model if hasattr(full_model, "model") else full_model
 
-        # Detect layer container (varies by architecture)
         for attr in ("layers", "h", "blocks"):
             if hasattr(model, attr):
                 all_layers = getattr(model, attr)
@@ -145,23 +151,39 @@ class _ShardWrapper(torch.nn.Module):
         else:
             raise ValueError("Cannot find transformer layer list in model")
 
-        self.layers = torch.nn.ModuleList(list(all_layers)[start:end])
+        wrapper.layers = _torch.nn.ModuleList(list(all_layers)[start:end])
 
         if is_first:
-            self.embed_tokens = model.embed_tokens if hasattr(model, "embed_tokens") else model.wte
+            wrapper.embed_tokens = (
+                model.embed_tokens if hasattr(model, "embed_tokens") else model.wte
+            )
         if is_last:
-            self.norm = model.norm if hasattr(model, "norm") else model.ln_f
-            self.lm_head = full_model.lm_head
+            wrapper.norm = model.norm if hasattr(model, "norm") else model.ln_f
+            wrapper.lm_head = full_model.lm_head
 
-    def embed(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.embed_tokens(input_ids)
+        self._module = wrapper
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        for layer in self.layers:
+    # Delegate device/eval to inner module
+    def to(self, device):
+        self._module = self._module.to(device)
+        return self
+
+    def eval(self):
+        self._module.eval()
+        return self
+
+    def parameters(self):
+        return self._module.parameters()
+
+    def embed(self, input_ids):
+        return self._module.embed_tokens(input_ids)
+
+    def __call__(self, hidden_states):
+        for layer in self._module.layers:
             out = layer(hidden_states)
             hidden_states = out[0] if isinstance(out, tuple) else out
         return hidden_states
 
-    def decode(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states = self.norm(hidden_states)
-        return self.lm_head(hidden_states)
+    def decode(self, hidden_states):
+        hidden_states = self._module.norm(hidden_states)
+        return self._module.lm_head(hidden_states)
