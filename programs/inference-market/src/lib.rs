@@ -25,21 +25,24 @@ pub mod inference_market {
 
     /// Post an inference job. Tokens are locked in escrow until job is settled.
     ///
-    /// `model_id`       – 32-byte identifier for the model (matches compute-registry entry)
-    /// `prompt_hash`    – SHA-256 of the encrypted prompt (actual prompt delivered off-chain)
-    /// `max_tokens`     – maximum output tokens (caps GPU work and payment)
-    /// `payment_amount` – tokens locked for this job
-    /// `deadline`       – unix timestamp; job auto-refunds if unclaimed by deadline
+    /// `model_id`    – 32-byte SHA-256 of the HuggingFace model name
+    /// `prompt_hash` – SHA-256 of the plaintext prompt (verified by node after decryption)
+    /// `prompt_cid`  – IPFS CID of the ECIES-encrypted prompt blob uploaded by the client
+    /// `max_tokens`  – caps GPU work and payment liability
+    /// `payment`     – tokens locked in escrow for this job
+    /// `deadline`    – unix timestamp; auto-refunds if unclaimed
     pub fn post_job(
         ctx: Context<PostJob>,
         model_id: [u8; 32],
         prompt_hash: [u8; 32],
+        prompt_cid: String,
         max_tokens: u32,
         payment_amount: u64,
         deadline: i64,
     ) -> Result<()> {
         require!(payment_amount > 0, MarketError::ZeroPayment);
         require!(max_tokens > 0 && max_tokens <= 8192, MarketError::InvalidMaxTokens);
+        require!(prompt_cid.len() <= 128, MarketError::CidTooLong);
         require!(
             deadline > Clock::get()?.unix_timestamp,
             MarketError::DeadlineInPast
@@ -63,6 +66,7 @@ pub mod inference_market {
         job.client = ctx.accounts.client.key();
         job.model_id = model_id;
         job.prompt_hash = prompt_hash;
+        job.prompt_cid = prompt_cid;
         job.max_tokens = max_tokens;
         job.payment_amount = payment_amount;
         job.deadline = deadline;
@@ -87,7 +91,6 @@ pub mod inference_market {
     }
 
     /// A registered compute node claims an open job.
-    /// Node must have an active registration in the compute-registry program.
     pub fn claim_job(ctx: Context<ClaimJob>) -> Result<()> {
         let job = &mut ctx.accounts.job;
 
@@ -109,7 +112,7 @@ pub mod inference_market {
         Ok(())
     }
 
-    /// Node submits the result. Result content is stored on IPFS/Arweave; only the hash goes on-chain.
+    /// Node submits the result. Only the hash goes on-chain; content lives on IPFS.
     pub fn submit_result(
         ctx: Context<SubmitResult>,
         result_hash: [u8; 32],
@@ -135,7 +138,7 @@ pub mod inference_market {
         Ok(())
     }
 
-    /// Client accepts the result and releases payment to the node (minus protocol fee).
+    /// Client accepts the result; payment released to node minus protocol fee.
     pub fn accept_result(ctx: Context<AcceptResult>) -> Result<()> {
         let job = &ctx.accounts.job;
 
@@ -156,7 +159,6 @@ pub mod inference_market {
         let seeds = &[b"job".as_ref(), &job.id.to_le_bytes(), &[job.bump]];
         let signer = &[&seeds[..]];
 
-        // Pay node
         token::transfer(
             CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
@@ -170,7 +172,6 @@ pub mod inference_market {
             node_payment,
         )?;
 
-        // Pay treasury
         token::transfer(
             CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
@@ -198,7 +199,6 @@ pub mod inference_market {
     }
 
     /// Client disputes a result within the challenge window.
-    /// Dispute resolution is handled by the DAO governance program.
     pub fn dispute_result(ctx: Context<DisputeResult>, reason: String) -> Result<()> {
         require!(reason.len() <= 256, MarketError::ReasonTooLong);
 
@@ -211,7 +211,6 @@ pub mod inference_market {
         require!(job.client == ctx.accounts.client.key(), MarketError::NotJobClient);
 
         let now = Clock::get()?.unix_timestamp;
-        // Auto-accept after challenge window passes (node can call this path too)
         require!(
             now <= job.claimed_at + CHALLENGE_WINDOW_SECONDS,
             MarketError::ChallengeWindowClosed
@@ -229,8 +228,7 @@ pub mod inference_market {
         Ok(())
     }
 
-    /// Anyone can call this to auto-settle a job after the challenge window.
-    /// Used so nodes don't need the client to be responsive.
+    /// Auto-settle after challenge window expires; anyone can call.
     pub fn auto_settle(ctx: Context<AutoSettle>) -> Result<()> {
         let job = &ctx.accounts.job;
 
@@ -294,10 +292,7 @@ pub mod inference_market {
     pub fn refund_expired(ctx: Context<RefundExpired>) -> Result<()> {
         let job = &ctx.accounts.job;
 
-        require!(
-            job.status == JobStatus::Open,
-            MarketError::JobNotOpen
-        );
+        require!(job.status == JobStatus::Open, MarketError::JobNotOpen);
         require!(
             Clock::get()?.unix_timestamp >= job.deadline,
             MarketError::JobNotExpired
@@ -344,8 +339,9 @@ pub struct Job {
     pub node: Pubkey,
     pub model_id: [u8; 32],
     pub prompt_hash: [u8; 32],
+    pub prompt_cid: String,   // IPFS CID of ECIES-encrypted prompt (max 128 bytes)
     pub result_hash: [u8; 32],
-    pub result_cid: String,  // IPFS / Arweave CID (max 128 bytes)
+    pub result_cid: String,   // IPFS CID of the inference result (max 128 bytes)
     pub max_tokens: u32,
     pub payment_amount: u64,
     pub deadline: i64,
@@ -383,7 +379,7 @@ pub struct Initialize<'info> {
 }
 
 #[derive(Accounts)]
-#[instruction(model_id: [u8; 32], prompt_hash: [u8; 32], max_tokens: u32, payment_amount: u64, deadline: i64)]
+#[instruction(model_id: [u8; 32], prompt_hash: [u8; 32], prompt_cid: String, max_tokens: u32, payment_amount: u64, deadline: i64)]
 pub struct PostJob<'info> {
     #[account(mut, seeds = [b"market"], bump = market.bump)]
     pub market: Account<'info, Market>,
@@ -391,8 +387,10 @@ pub struct PostJob<'info> {
     #[account(
         init,
         payer = client,
-        // 8 disc + job fields (roughly 400 bytes, padded)
-        space = 8 + 8 + 32 + 32 + 32 + 32 + 32 + 4 + 128 + 4 + 8 + 8 + 8 + 1 + 1,
+        // disc(8) + id(8) + client(32) + node(32) + model_id(32) + prompt_hash(32)
+        // + prompt_cid(4+128) + result_hash(32) + result_cid(4+128) + max_tokens(4)
+        // + payment(8) + deadline(8) + claimed_at(8) + status(1) + bump(1) = 470
+        space = 8 + 8 + 32 + 32 + 32 + 32 + 132 + 32 + 132 + 4 + 8 + 8 + 8 + 1 + 1,
         seeds = [b"job", &market.total_jobs.to_le_bytes()],
         bump
     )]
@@ -406,7 +404,7 @@ pub struct PostJob<'info> {
     )]
     pub escrow_token_account: Account<'info, TokenAccount>,
 
-    #[account(mut, constraint = client_token_account.mint == market.token_mint)]
+    #[account(mut, constraint = client_token_account.mint == market.token_mint @ MarketError::WrongMint)]
     pub client_token_account: Account<'info, TokenAccount>,
 
     pub token_mint: Account<'info, Mint>,
@@ -422,7 +420,6 @@ pub struct PostJob<'info> {
 pub struct ClaimJob<'info> {
     #[account(mut, seeds = [b"job", &job.id.to_le_bytes()], bump = job.bump)]
     pub job: Account<'info, Job>,
-    // Node signer – verified against compute-registry via account constraint
     pub node: Signer<'info>,
 }
 
@@ -438,7 +435,7 @@ pub struct AcceptResult<'info> {
     #[account(mut, seeds = [b"job", &job.id.to_le_bytes()], bump = job.bump)]
     pub job: Account<'info, Job>,
 
-    #[account(mut, constraint = escrow_token_account.mint == job.key())]
+    #[account(mut, constraint = escrow_token_account.owner == job.key() @ MarketError::WrongEscrow)]
     pub escrow_token_account: Account<'info, TokenAccount>,
     #[account(mut)]
     pub node_token_account: Account<'info, TokenAccount>,
@@ -557,4 +554,8 @@ pub enum MarketError {
     CidTooLong,
     #[msg("Dispute reason too long (max 256 bytes)")]
     ReasonTooLong,
+    #[msg("Token account uses wrong mint")]
+    WrongMint,
+    #[msg("Escrow account does not belong to this job")]
+    WrongEscrow,
 }

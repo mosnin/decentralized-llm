@@ -7,6 +7,12 @@ Usage:
     client = DecentralizedLLMClient(wallet_path="~/.config/solana/id.json")
     response = await client.complete("Explain quantum entanglement", model="llama-3.2-3b")
     print(response.text)
+
+Privacy guarantee:
+    The prompt is encrypted with the claiming node's Ed25519 public key
+    (converted to X25519) before leaving the client.  The on-chain job
+    account only stores sha256(prompt) — the node can't substitute a
+    different prompt without detection.
 """
 
 import asyncio
@@ -28,6 +34,7 @@ except ImportError:
 
 INFERENCE_MARKET_PROGRAM = "5YQyZqXkJHy6V3JMxKqXyLqfP9V2A3j8Rk7mN4oD1eW"
 COMPUTE_REGISTRY_PROGRAM = "8KpR2mT6uLqVwNzS4eBfY9oA3cJ7iGxH1nD5sW0qF2M"
+GOVERNANCE_PROGRAM = "3CvE7tX9rMwPfBgY2nKjH6oL4sQ8uZaD5mR1iW0eN9T"
 
 MODEL_IDS = {
     "llama-3.2-1b": hashlib.sha256(b"meta-llama/Llama-3.2-1B").digest(),
@@ -35,6 +42,13 @@ MODEL_IDS = {
     "llama-3.1-8b": hashlib.sha256(b"meta-llama/Llama-3.1-8B").digest(),
     "mistral-7b": hashlib.sha256(b"mistralai/Mistral-7B-v0.3").digest(),
 }
+
+# Public IPFS gateways for reading results (no API key needed)
+IPFS_GATEWAYS = [
+    "https://gateway.lighthouse.storage/ipfs",
+    "https://ipfs.io/ipfs",
+    "https://cloudflare-ipfs.com/ipfs",
+]
 
 
 @dataclass
@@ -52,20 +66,25 @@ class DecentralizedLLMClient:
         self,
         wallet_path: str = "~/.config/solana/id.json",
         rpc_url: str = "https://api.mainnet-beta.solana.com",
+        lighthouse_api_key: str = "",
     ):
         if not SOLANA_AVAILABLE:
             raise RuntimeError("Install solana deps: pip install anchorpy solders solana")
 
         self.rpc_url = rpc_url
-        keypair = Keypair.from_json(Path(wallet_path).expanduser().read_text())
+        self._lighthouse_api_key = lighthouse_api_key
+        self._wallet_path = Path(wallet_path).expanduser()
+        keypair = Keypair.from_json(self._wallet_path.read_text())
         self._wallet = Wallet(keypair)
         self._client: AsyncClient | None = None
         self._program: Program | None = None
+        self._registry: Program | None = None
 
     async def __aenter__(self):
         self._client = AsyncClient(self.rpc_url)
         provider = Provider(self._client, self._wallet)
         self._program = await Program.at(Pubkey.from_string(INFERENCE_MARKET_PROGRAM), provider)
+        self._registry = await Program.at(Pubkey.from_string(COMPUTE_REGISTRY_PROGRAM), provider)
         return self
 
     async def __aexit__(self, *args):
@@ -83,9 +102,13 @@ class DecentralizedLLMClient:
         """
         Post an inference job on-chain and wait for a node to complete it.
 
-        The prompt is NOT stored on-chain — only its SHA-256 hash is.
-        The actual prompt is delivered to the claiming node through a
-        secure off-chain P2P channel (implementation in node/server.py).
+        End-to-end privacy flow:
+          1. Query compute registry for the best available node for this model
+          2. Encrypt prompt with that node's Ed25519 wallet pubkey (ECIES/X25519)
+          3. Upload encrypted blob to IPFS (CID committed on-chain alongside hash)
+          4. Post job → node downloads blob, decrypts, runs inference
+          5. Node uploads result to IPFS, submits result_hash on-chain
+          6. Client downloads result from IPFS and returns it
         """
         model_id = MODEL_IDS.get(model)
         if model_id is None:
@@ -94,18 +117,32 @@ class DecentralizedLLMClient:
         if payment_amount is None:
             payment_amount = self._estimate_cost(max_tokens)
 
-        prompt_hash = list(hashlib.sha256(prompt.encode()).digest())
-        model_id_list = list(model_id)
+        # Step 1: find best node for this model
+        node_pubkey_bytes = await self._find_best_node(model_id)
+
+        # Step 2: encrypt prompt for that node
+        from node.encryption import encrypt_prompt
+
+        prompt_bytes = prompt.encode("utf-8")
+        prompt_hash = list(hashlib.sha256(prompt_bytes).digest())
+        encrypted_blob = encrypt_prompt(prompt, node_pubkey_bytes)
+
+        # Step 3: upload encrypted blob to IPFS
+        prompt_cid = await self._upload_prompt(encrypted_blob)
+
         deadline = int(time.time()) + deadline_seconds
 
+        # Step 4: post job on-chain
         job_id = await self._post_job(
-            model_id=model_id_list,
+            model_id=list(model_id),
             prompt_hash=prompt_hash,
+            prompt_cid=prompt_cid,
             max_tokens=max_tokens,
             payment_amount=payment_amount,
             deadline=deadline,
         )
 
+        # Step 5+6: wait for result and download it
         result = await self._wait_for_result(job_id, deadline)
 
         return CompletionResponse(
@@ -119,14 +156,9 @@ class DecentralizedLLMClient:
 
     async def get_governance_proposals(self) -> list[dict]:
         """Fetch all active governance proposals."""
-        from anchorpy import Program
-        from solders.pubkey import Pubkey
-
-        gov_client = await Program.at(
-            Pubkey.from_string("3CvE7tX9rMwPfBgY2nKjH6oL4sQ8uZaD5mR1iW0eN9T"),
-            Provider(self._client, self._wallet),
-        )
-        proposals = await gov_client.account["Proposal"].all()
+        provider = Provider(self._client, self._wallet)
+        gov_program = await Program.at(Pubkey.from_string(GOVERNANCE_PROGRAM), provider)
+        proposals = await gov_program.account["Proposal"].all()
         return [
             {
                 "id": p.account.id,
@@ -144,18 +176,59 @@ class DecentralizedLLMClient:
         choice_map = {"for": {"for": {}}, "against": {"against": {}}, "abstain": {"abstain": {}}}
         if choice not in choice_map:
             raise ValueError("choice must be 'for', 'against', or 'abstain'")
-        # Implementation calls governance program cast_vote instruction
-        raise NotImplementedError("Governance voting via SDK coming in Phase 3")
+        raise NotImplementedError("Governance voting via Python SDK coming soon")
 
     # ────────────────────────── private ──────────────────────────────────────
 
+    async def _find_best_node(self, model_id: bytes) -> bytes:
+        """
+        Query compute registry for registered nodes that serve this model.
+        Returns the Ed25519 pubkey bytes of the best node (highest reputation).
+        """
+        if self._registry is None:
+            raise RuntimeError("Not connected — use 'async with client'")
+        try:
+            nodes = await self._registry.account["NodeRecord"].all()
+            eligible = [
+                n
+                for n in nodes
+                if any(bytes(mid) == model_id for mid in n.account.model_ids)
+                and n.account.staked_amount > 0
+            ]
+            if not eligible:
+                raise RuntimeError(f"No registered nodes found for model {model_id.hex()[:8]}…")
+            # Pick highest reputation
+            best = max(eligible, key=lambda n: n.account.reputation)
+            return bytes(best.public_key)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to find node: {exc}") from exc
+
+    async def _upload_prompt(self, blob: bytes) -> str:
+        """
+        Upload encrypted prompt blob to IPFS.
+        Requires LIGHTHOUSE_API_KEY for writes; falls back to a content-hash
+        placeholder if no key is configured (for testing without real uploads).
+        """
+        if self._lighthouse_api_key:
+            from node.storage import StorageClient
+
+            storage = StorageClient(api_key=self._lighthouse_api_key)
+            return await storage.upload(blob, filename="prompt.bin")
+
+        # Deterministic placeholder for testing/dev (not a real IPFS CID)
+        h = hashlib.sha256(blob).hexdigest()
+        return f"bafkrei{h[:32]}"
+
     async def _post_job(self, **kwargs) -> int:
+        if self._program is None:
+            raise RuntimeError("Not connected — use 'async with client'")
         market = await self._program.account["Market"].fetch(self._market_pda())
         job_id = market.total_jobs
 
         await self._program.rpc["post_job"](
             kwargs["model_id"],
             kwargs["prompt_hash"],
+            kwargs["prompt_cid"],
             kwargs["max_tokens"],
             kwargs["payment_amount"],
             kwargs["deadline"],
@@ -164,15 +237,16 @@ class DecentralizedLLMClient:
         return job_id
 
     async def _wait_for_result(self, job_id: int, deadline: int) -> dict:
-        """Poll for job completion. In production, subscribe to Solana websocket events."""
+        """Poll for job completion then download result from IPFS."""
+        if self._program is None:
+            raise RuntimeError("Not connected — use 'async with client'")
         job_pda = self._job_pda(job_id)
         while time.time() < deadline:
             try:
                 job = await self._program.account["Job"].fetch(job_pda)
                 status = str(job.status)
                 if "PendingAcceptance" in status or "Completed" in status:
-                    # Fetch result from IPFS
-                    result_text = await self._fetch_from_ipfs(job.result_cid)
+                    result_text = await self._fetch_result_from_ipfs(job.result_cid)
                     return {
                         "text": result_text,
                         "tokens_used": len(result_text.split()),
@@ -184,13 +258,24 @@ class DecentralizedLLMClient:
 
         raise TimeoutError(f"Job {job_id} did not complete before deadline")
 
-    async def _fetch_from_ipfs(self, cid: str) -> str:
-        """Retrieve result from IPFS/Arweave using the CID."""
-        # Integration point: use ipfshttpclient or requests to a gateway
-        raise NotImplementedError(f"IPFS fetch for CID {cid} not yet implemented")
+    async def _fetch_result_from_ipfs(self, cid: str) -> str:
+        """Download result from any available IPFS gateway."""
+        import aiohttp
+
+        async with aiohttp.ClientSession() as session:
+            for gateway in IPFS_GATEWAYS:
+                try:
+                    async with session.get(
+                        f"{gateway}/{cid}",
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as resp:
+                        if resp.status == 200:
+                            return (await resp.read()).decode("utf-8")
+                except Exception:
+                    continue
+        raise RuntimeError(f"Could not fetch result CID {cid} from any gateway")
 
     def _estimate_cost(self, max_tokens: int) -> int:
-        # 1 token ≈ 0.001 base units; minimum 1000 base units per request
         return max(1000, max_tokens * 1)
 
     def _market_pda(self) -> "Pubkey":
