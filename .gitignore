@@ -22,3 +22,17 @@ dist/
 
 # Solana
 test-ledger/
+
+# Docker
+*.tar
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Secrets (belt-and-suspenders — never commit these)
+id.json
+*.pem
+*.key
