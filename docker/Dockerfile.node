@@ -1,20 +1,51 @@
-FROM nvidia/cuda:12.4.0-runtime-ubuntu22.04
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
 
-# System deps
-RUN apt-get update && apt-get install -y \
-    python3.11 python3.11-dev python3-pip curl git \
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 python3.11-dev python3-pip git curl \
     && rm -rf /var/lib/apt/lists/*
 
+RUN ln -sf /usr/bin/python3.11 /usr/local/bin/python3
+
 WORKDIR /app
-COPY pyproject.toml ./
+
+# Install Python deps before copying source (layer caching)
+COPY pyproject.toml .
+RUN pip3 install --no-cache-dir \
+    "torch>=2.2.0" --index-url https://download.pytorch.org/whl/cu121 && \
+    pip3 install --no-cache-dir \
+    "transformers>=4.40.0" \
+    "accelerate>=0.30.0" \
+    "peft>=0.10.0" \
+    "hivemind>=1.1.0" \
+    "anchorpy>=0.20.0" \
+    "solders>=0.21.0" \
+    "solana>=0.34.0" \
+    "cryptography>=41.0" \
+    "lighthouseweb3>=0.1.5" \
+    "aiohttp>=3.9.0"
+
 COPY node/ ./node/
 COPY integrations/ ./integrations/
+COPY finetuning/ ./finetuning/
 
-RUN pip install --no-cache-dir -e ".[dev]"
+# Default env — override via docker run -e or docker-compose environment:
+ENV LISTEN_HOST=0.0.0.0 \
+    LISTEN_PORT=70070 \
+    MODEL_NAME=meta-llama/Llama-3.2-3B \
+    NUM_SHARDS=1 \
+    SHARD_INDEX=0 \
+    MODEL_DTYPE=float16 \
+    MAX_CONCURRENT_JOBS=4
 
-# Pre-download model weights at build time for faster startup (optional)
-# RUN python -c "from transformers import AutoModelForCausalLM; AutoModelForCausalLM.from_pretrained('meta-llama/Llama-3.2-3B')"
+# Vast.ai maps external port via $VAST_TCP_PORT_70070 at runtime
+EXPOSE 70070
 
-EXPOSE 7070
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD python3 -c "import socket; s=socket.socket(); s.connect(('localhost', int(__import__('os').getenv('LISTEN_PORT', 70070)))); s.close()" \
+    || exit 1
 
-CMD ["python", "-m", "node.server"]
+CMD ["python3", "-m", "node.server"]

@@ -1,139 +1,95 @@
 version: "3.9"
 
-# Local development stack:
-#   - Solana test validator
-#   - 3 compute nodes (simulating 3 GPU shards)
-#   - API gateway for client access
+# Development stack — CPU-only, 2 shards, no GPU required.
+# For production GPU deployment use: python scripts/deploy_network.py
 #
-# GPU nodes: set NVIDIA_VISIBLE_DEVICES or remove the `deploy` section for CPU-only testing.
+# Usage:
+#   cp .env.example .env        # add SOLANA_RPC_URL, LIGHTHOUSE_API_KEY, etc.
+#   docker compose up --build
+#
+# Solana: point SOLANA_RPC_URL at devnet or run a local validator separately.
+
+x-node-common: &node-common
+  build:
+    context: .
+    dockerfile: docker/Dockerfile.node
+  environment:
+    SOLANA_RPC_URL:       ${SOLANA_RPC_URL:-https://api.devnet.solana.com}
+    LIGHTHOUSE_API_KEY:   ${LIGHTHOUSE_API_KEY:-}
+    WALLET_PATH:          /wallet/id.json
+    MODEL_NAME:           ${MODEL_NAME:-meta-llama/Llama-3.2-1B}
+    NUM_SHARDS:           "2"
+    MODEL_DTYPE:          ${MODEL_DTYPE:-float32}
+    MAX_CONCURRENT_JOBS:  "2"
+  volumes:
+    - model-cache:/root/.cache/decentralized-llm
+    - ${WALLET_PATH:-~/.config/solana/id.json}:/wallet/id.json:ro
+  restart: unless-stopped
 
 services:
-  solana-validator:
-    image: solanalabs/solana:v1.18.0
-    command: >
-      solana-test-validator
-      --ledger /ledger
-      --rpc-port 8899
-      --bind-address 0.0.0.0
-      --log
-    ports:
-      - "8899:8899"
-      - "8900:8900"
-    volumes:
-      - solana-ledger:/ledger
-    healthcheck:
-      test: ["CMD", "solana", "cluster-version", "--url", "http://localhost:8899"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
-  # Bootstrap DHT node (no shard, just provides peer discovery)
-  dht-bootstrap:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.node
+  # ── Shard 0: embedding + first half of transformer layers ─────────────────
+  node-0:
+    <<: *node-common
+    container_name: dllm-node-0
     environment:
-      MODEL_NAME: "meta-llama/Llama-3.2-3B"
-      NUM_SHARDS: "3"
-      SHARD_INDEX: "0"
-      LISTEN_PORT: "7070"
-      PUBLIC_HOST: "dht-bootstrap"
-      SOLANA_RPC_URL: "http://solana-validator:8899"
-      MAX_CONCURRENT_JOBS: "2"
+      SHARD_INDEX:          "0"
+      LISTEN_PORT:          "70070"
+      PUBLIC_HOST:          "node-0"
+      DHT_BOOTSTRAP_PEERS:  ""
     ports:
-      - "7070:7070"
-    depends_on:
-      solana-validator:
-        condition: service_healthy
+      - "70070:70070"
+    networks:
+      - dllm-net
+    # Uncomment to use a real GPU:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
 
-  node-shard-0:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.node
+  # ── Shard 1: second half of layers + LM head ─────────────────────────────
+  node-1:
+    <<: *node-common
+    container_name: dllm-node-1
     environment:
-      MODEL_NAME: "meta-llama/Llama-3.2-3B"
-      NUM_SHARDS: "3"
-      SHARD_INDEX: "0"
-      LISTEN_PORT: "7071"
-      PUBLIC_HOST: "node-shard-0"
-      DHT_BOOTSTRAP_PEERS: "/ip4/dht-bootstrap/tcp/7070"
-      SOLANA_RPC_URL: "http://solana-validator:8899"
-      MODEL_DTYPE: "float16"
+      SHARD_INDEX:          "1"
+      LISTEN_PORT:          "70071"
+      PUBLIC_HOST:          "node-1"
+      DHT_BOOTSTRAP_PEERS:  "/ip4/node-0/tcp/70070"
     ports:
-      - "7071:7071"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+      - "70071:70071"
     depends_on:
-      - dht-bootstrap
+      - node-0
+    networks:
+      - dllm-net
 
-  node-shard-1:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.node
-    environment:
-      MODEL_NAME: "meta-llama/Llama-3.2-3B"
-      NUM_SHARDS: "3"
-      SHARD_INDEX: "1"
-      LISTEN_PORT: "7072"
-      PUBLIC_HOST: "node-shard-1"
-      DHT_BOOTSTRAP_PEERS: "/ip4/dht-bootstrap/tcp/7070"
-      SOLANA_RPC_URL: "http://solana-validator:8899"
-      MODEL_DTYPE: "float16"
-    ports:
-      - "7072:7072"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    depends_on:
-      - dht-bootstrap
-
-  node-shard-2:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.node
-    environment:
-      MODEL_NAME: "meta-llama/Llama-3.2-3B"
-      NUM_SHARDS: "3"
-      SHARD_INDEX: "2"
-      LISTEN_PORT: "7073"
-      PUBLIC_HOST: "node-shard-2"
-      DHT_BOOTSTRAP_PEERS: "/ip4/dht-bootstrap/tcp/7070"
-      SOLANA_RPC_URL: "http://solana-validator:8899"
-      MODEL_DTYPE: "float16"
-    ports:
-      - "7073:7073"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    depends_on:
-      - dht-bootstrap
-
-  # REST API gateway — wraps client SDK for non-Python consumers
-  api-gateway:
+  # ── REST API gateway (OpenAI-compatible) ──────────────────────────────────
+  gateway:
     build:
       context: .
       dockerfile: docker/Dockerfile.api
+    container_name: dllm-gateway
     environment:
-      SOLANA_RPC_URL: "http://solana-validator:8899"
-      PAYSH_API_KEY: "${PAYSH_API_KEY}"
-      PAYSH_WEBHOOK_SECRET: "${PAYSH_WEBHOOK_SECRET}"
+      SOLANA_RPC_URL:         ${SOLANA_RPC_URL:-https://api.devnet.solana.com}
+      LIGHTHOUSE_API_KEY:     ${LIGHTHOUSE_API_KEY:-}
+      PAYSH_API_KEY:          ${PAYSH_API_KEY:-}
+      PAYSH_WEBHOOK_SECRET:   ${PAYSH_WEBHOOK_SECRET:-}
+      WALLET_PATH:            /wallet/id.json
+    volumes:
+      - ${WALLET_PATH:-~/.config/solana/id.json}:/wallet/id.json:ro
     ports:
       - "8000:8000"
     depends_on:
-      - solana-validator
+      - node-0
+      - node-1
+    networks:
+      - dllm-net
 
 volumes:
-  solana-ledger:
+  model-cache:
+
+networks:
+  dllm-net:
+    driver: bridge

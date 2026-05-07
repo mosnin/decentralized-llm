@@ -1,14 +1,33 @@
 FROM python:3.11-slim
 
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
 WORKDIR /app
-COPY pyproject.toml ./
+
+COPY pyproject.toml .
+RUN pip3 install --no-cache-dir \
+    "fastapi>=0.111.0" \
+    "uvicorn[standard]>=0.29.0" \
+    "anchorpy>=0.20.0" \
+    "solders>=0.21.0" \
+    "solana>=0.34.0" \
+    "cryptography>=41.0" \
+    "lighthouseweb3>=0.1.5" \
+    "aiohttp>=3.9.0"
+
+COPY scripts/api_gateway.py ./scripts/
 COPY client/ ./client/
 COPY integrations/ ./integrations/
-
-RUN pip install --no-cache-dir fastapi uvicorn anchorpy solders solana
-
-COPY scripts/api_gateway.py ./api_gateway.py
+COPY node/encryption.py ./node/
+COPY node/storage.py ./node/
+COPY node/config.py ./node/
+COPY node/__init__.py ./node/
 
 EXPOSE 8000
 
-CMD ["uvicorn", "api_gateway:app", "--host", "0.0.0.0", "--port", "8000"]
+HEALTHCHECK --interval=15s --timeout=5s --retries=3 \
+    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" \
+    || exit 1
+
+CMD ["uvicorn", "scripts.api_gateway:app", "--host", "0.0.0.0", "--port", "8000"]
