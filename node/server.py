@@ -140,14 +140,15 @@ class Node:
         hidden = await loop.run_in_executor(None, self.shard_mgr.forward, hidden)
 
         if self.config.shard_index < self.config.num_shards - 1:
-            next_shard = await self.p2p.get_next_shard_peer(self.config.shard_index + 1)
-            if next_shard is None:
-                raise RuntimeError(f"Shard {self.config.shard_index + 1} not available")
-            result = await next_shard.forward(hidden)
-            return str(result)  # downstream shard returns final text
+            # Push activations into the DHT for the next shard to pick up
+            await self._push_activations(job.job_id, hidden)
+            # Block until the final shard publishes the result to the DHT
+            return await self._await_result(job.job_id)
         else:
-            # Last shard: generate tokens autoregressively
-            return await loop.run_in_executor(None, self._generate, hidden, job.max_tokens)
+            # Last shard: generate tokens autoregressively and publish result
+            result = await loop.run_in_executor(None, self._generate, hidden, job.max_tokens)
+            await self._publish_result(job.job_id, result)
+            return result
 
     def _tokenize(self, prompt: str):
         tokens = self.shard_mgr.tokenizer(
@@ -225,6 +226,65 @@ class Node:
             await asyncio.sleep(0.5)
 
         raise TimeoutError(f"Timed out waiting for activations for job {job_id}")
+
+    async def _push_activations(self, job_id: int, hidden) -> None:
+        """
+        Push this shard's output tensor into the DHT so the next shard can read it.
+        Key: "activations.<job_id>.<next_shard_index>"
+        """
+        if self.p2p is None or self.p2p.dht is None:
+            raise RuntimeError("P2P layer not started")
+
+        import hivemind
+
+        next_idx = self.config.shard_index + 1
+        key = f"activations.{job_id}.{next_idx}"
+        value = {
+            "tensor": list(hidden.cpu().numpy().tobytes()),
+            "shape": list(hidden.shape),
+            "dtype": str(hidden.dtype).replace("torch.", ""),
+        }
+        await asyncio.get_event_loop().run_in_executor(
+            None,
+            self.p2p.dht.store,
+            key,
+            value,
+            hivemind.get_dht_time() + 300,  # 5-minute TTL
+        )
+        logger.debug("Pushed activations for job %d → shard %d", job_id, next_idx)
+
+    async def _publish_result(self, job_id: int, result_text: str) -> None:
+        """Publish final result text into DHT so shard 0 can collect it."""
+        if self.p2p is None or self.p2p.dht is None:
+            return
+
+        import hivemind
+
+        key = f"result.{job_id}"
+        await asyncio.get_event_loop().run_in_executor(
+            None,
+            self.p2p.dht.store,
+            key,
+            {"text": result_text},
+            hivemind.get_dht_time() + 300,
+        )
+
+    async def _await_result(self, job_id: int, timeout: float = 300.0) -> str:
+        """
+        Non-final shards wait here until the last shard publishes the result.
+        """
+        if self.p2p is None or self.p2p.dht is None:
+            raise RuntimeError("P2P layer not started")
+
+        key = f"result.{job_id}"
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            val = await asyncio.get_event_loop().run_in_executor(None, self.p2p.dht.get, key)
+            if val is not None:
+                return val["text"]
+            await asyncio.sleep(0.5)
+
+        raise TimeoutError(f"Timed out waiting for result of job {job_id}")
 
     async def _upload_result(self, job_id: int, result_text: str) -> str:
         """Upload inference result to Lighthouse (IPFS+Filecoin) and return the CID."""
