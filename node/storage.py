@@ -12,7 +12,6 @@ Set LIGHTHOUSE_API_KEY in your environment.
 """
 
 import asyncio
-import hashlib
 import os
 import tempfile
 from pathlib import Path
@@ -36,12 +35,12 @@ class StorageClient:
         self._api_key = api_key or LIGHTHOUSE_API_KEY
         if not self._api_key:
             raise ValueError(
-                "LIGHTHOUSE_API_KEY not set. "
-                "Get a free key at https://files.lighthouse.storage/"
+                "LIGHTHOUSE_API_KEY not set. Get a free key at https://files.lighthouse.storage/"
             )
 
         try:
             from lighthouseweb3 import Lighthouse
+
             self._lh = Lighthouse(token=self._api_key)
         except ImportError:
             raise RuntimeError("pip install lighthouseweb3")
@@ -73,9 +72,7 @@ class StorageClient:
         return await self.upload(blob, filename=f"prompt_{job_id}.bin")
 
     async def upload_result(self, result_text: str, job_id: int) -> str:
-        return await self.upload(
-            result_text.encode("utf-8"), filename=f"result_{job_id}.txt"
-        )
+        return await self.upload(result_text.encode("utf-8"), filename=f"result_{job_id}.txt")
 
     # ─────────────────────────── sync internals ───────────────────────────────
 

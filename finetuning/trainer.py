@@ -17,19 +17,20 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
-
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
 try:
     from peft import LoraConfig, TaskType, get_peft_model
+
     PEFT_AVAILABLE = True
 except ImportError:
     PEFT_AVAILABLE = False
 
 try:
     import hivemind
+
     HIVEMIND_AVAILABLE = True
 except ImportError:
     HIVEMIND_AVAILABLE = False

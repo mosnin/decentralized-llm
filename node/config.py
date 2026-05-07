@@ -1,6 +1,6 @@
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
-import os
 
 
 @dataclass
@@ -20,9 +20,9 @@ class NodeConfig:
     listen_host: str = os.getenv("LISTEN_HOST", "0.0.0.0")
     listen_port: int = int(os.getenv("LISTEN_PORT", "7070"))
     public_host: str | None = os.getenv("PUBLIC_HOST")  # set by GPU rental provider env
-    dht_bootstrap_peers: list[str] = field(default_factory=lambda: [
-        p for p in os.getenv("DHT_BOOTSTRAP_PEERS", "").split(",") if p
-    ])
+    dht_bootstrap_peers: list[str] = field(
+        default_factory=lambda: [p for p in os.getenv("DHT_BOOTSTRAP_PEERS", "").split(",") if p]
+    )
 
     # Model serving
     model_name: str = os.getenv("MODEL_NAME", "meta-llama/Llama-3.2-3B")

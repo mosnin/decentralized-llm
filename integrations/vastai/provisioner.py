@@ -37,13 +37,14 @@ INTERNAL_DHT_PORT = 70070
 @dataclass
 class GpuRequirements:
     """Filters for GPU instance selection."""
-    min_vram_gb: int = 24          # 24 GB minimum for 7B models at fp16
-    gpu_name: str | None = None    # e.g., "RTX_4090", "A100", None = any
+
+    min_vram_gb: int = 24  # 24 GB minimum for 7B models at fp16
+    gpu_name: str | None = None  # e.g., "RTX_4090", "A100", None = any
     max_price_per_hour: float = 2.0
     min_reliability: float = 0.95  # host reliability score (0–1)
     verified_only: bool = True
     num_gpus: int = 1
-    disk_gb: int = 80              # model weights + OS
+    disk_gb: int = 80  # model weights + OS
 
 
 @dataclass
@@ -54,8 +55,8 @@ class GpuInstance:
     vram_gb: int
     price_per_hour: float
     public_ip: str
-    public_port: int       # external DHT port
-    status: str            # "rented", "running", "stopped"
+    public_port: int  # external DHT port
+    status: str  # "rented", "running", "stopped"
     ssh_host: str
     ssh_port: int
     env_vars: dict[str, str] = field(default_factory=dict)
@@ -83,6 +84,7 @@ class VastAiProvisioner:
 
         try:
             import vastai
+
             self._sdk = vastai.VastAI(api_key=self._api_key)
         except ImportError:
             raise RuntimeError("pip install vastai")
@@ -161,9 +163,9 @@ class VastAiProvisioner:
 
         # On Vast.ai, $VAST_TCP_PORT_70070 gives the external port for container port 70070
         onstart_cmd = (
-            f'export PUBLIC_HOST=$(curl -s ifconfig.me) && '
-            f'export LISTEN_PORT=$VAST_TCP_PORT_{INTERNAL_DHT_PORT} && '
-            f'python -m node.server'
+            f"export PUBLIC_HOST=$(curl -s ifconfig.me) && "
+            f"export LISTEN_PORT=$VAST_TCP_PORT_{INTERNAL_DHT_PORT} && "
+            f"python -m node.server"
         )
 
         result = await asyncio.get_event_loop().run_in_executor(
@@ -195,16 +197,12 @@ class VastAiProvisioner:
 
     async def list_instances(self) -> list[GpuInstance]:
         """List all currently rented instances."""
-        raw = await asyncio.get_event_loop().run_in_executor(
-            None, self._sdk.show_instances
-        )
+        raw = await asyncio.get_event_loop().run_in_executor(None, self._sdk.show_instances)
         return [self._parse_instance(inst) for inst in (raw or [])]
 
     # ─────────────────────────── private ─────────────────────────────────────
 
-    async def _wait_for_running(
-        self, instance_id: int, timeout_seconds: int = 300
-    ) -> GpuInstance:
+    async def _wait_for_running(self, instance_id: int, timeout_seconds: int = 300) -> GpuInstance:
         """Poll until instance reaches 'running' status and has a public IP."""
         deadline = time.time() + timeout_seconds
         while time.time() < deadline:
@@ -225,8 +223,10 @@ class VastAiProvisioner:
     def _parse_instance(self, inst: dict) -> GpuInstance:
         public_ip = inst.get("public_ipaddr", "")
         # Vast.ai external port for our DHT port
-        external_port = inst.get(f"ports", {}).get(f"{INTERNAL_DHT_PORT}/tcp", [{}])[0].get(
-            "HostPort", INTERNAL_DHT_PORT
+        external_port = (
+            inst.get("ports", {})
+            .get(f"{INTERNAL_DHT_PORT}/tcp", [{}])[0]
+            .get("HostPort", INTERNAL_DHT_PORT)
         )
         return GpuInstance(
             offer_id=inst.get("offer_id", 0),

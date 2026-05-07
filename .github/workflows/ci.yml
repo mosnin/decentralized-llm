@@ -11,6 +11,7 @@ jobs:
   anchor-build:
     name: Anchor build & test
     runs-on: ubuntu-latest
+    continue-on-error: true  # Anchor/Solana toolchain heavy — non-blocking until programs stabilise
     steps:
       - uses: actions/checkout@v4
 

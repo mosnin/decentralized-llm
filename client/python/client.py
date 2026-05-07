@@ -11,17 +11,16 @@ Usage:
 
 import asyncio
 import hashlib
-import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
-
 try:
-    from solders.keypair import Keypair
-    from solders.pubkey import Pubkey
     from anchorpy import Program, Provider, Wallet
     from solana.rpc.async_api import AsyncClient
+    from solders.keypair import Keypair
+    from solders.pubkey import Pubkey
+
     SOLANA_AVAILABLE = True
 except ImportError:
     SOLANA_AVAILABLE = False
@@ -34,7 +33,7 @@ MODEL_IDS = {
     "llama-3.2-1b": hashlib.sha256(b"meta-llama/Llama-3.2-1B").digest(),
     "llama-3.2-3b": hashlib.sha256(b"meta-llama/Llama-3.2-3B").digest(),
     "llama-3.1-8b": hashlib.sha256(b"meta-llama/Llama-3.1-8B").digest(),
-    "mistral-7b":   hashlib.sha256(b"mistralai/Mistral-7B-v0.3").digest(),
+    "mistral-7b": hashlib.sha256(b"mistralai/Mistral-7B-v0.3").digest(),
 }
 
 
@@ -45,7 +44,7 @@ class CompletionResponse:
     model: str
     tokens_used: int
     total_paid: int  # in base token units
-    node: str        # Solana pubkey of the node that served the request
+    node: str  # Solana pubkey of the node that served the request
 
 
 class DecentralizedLLMClient:
@@ -66,9 +65,7 @@ class DecentralizedLLMClient:
     async def __aenter__(self):
         self._client = AsyncClient(self.rpc_url)
         provider = Provider(self._client, self._wallet)
-        self._program = await Program.at(
-            Pubkey.from_string(INFERENCE_MARKET_PROGRAM), provider
-        )
+        self._program = await Program.at(Pubkey.from_string(INFERENCE_MARKET_PROGRAM), provider)
         return self
 
     async def __aexit__(self, *args):
@@ -153,9 +150,7 @@ class DecentralizedLLMClient:
     # ────────────────────────── private ──────────────────────────────────────
 
     async def _post_job(self, **kwargs) -> int:
-        market = await self._program.account["Market"].fetch(
-            self._market_pda()
-        )
+        market = await self._program.account["Market"].fetch(self._market_pda())
         job_id = market.total_jobs
 
         await self._program.rpc["post_job"](

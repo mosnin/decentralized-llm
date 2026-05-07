@@ -4,9 +4,10 @@ import hashlib
 import hmac
 import json
 import time
+
 import pytest
 
-from integrations.paysh.handler import PayshHandler, PaymentEvent, TOKENS_PER_USD_CENT
+from integrations.paysh.handler import TOKENS_PER_USD_CENT, PaymentEvent, PayshHandler
 
 
 def _make_signature(body: bytes, secret: str) -> str:

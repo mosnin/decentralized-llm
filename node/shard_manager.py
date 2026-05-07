@@ -13,7 +13,6 @@ Shard N-1 additionally runs the LM head / final layer norm.
 import logging
 from pathlib import Path
 
-
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
@@ -32,9 +31,7 @@ class ShardManager:
         cache_dir = Path(self.config.cache_dir)
         cache_dir.mkdir(parents=True, exist_ok=True)
 
-        model_cfg = AutoConfig.from_pretrained(
-            self.config.model_name, cache_dir=cache_dir
-        )
+        model_cfg = AutoConfig.from_pretrained(self.config.model_name, cache_dir=cache_dir)
 
         total_layers = self._get_total_layers(model_cfg)
         self.layer_slice = self._compute_slice(total_layers)

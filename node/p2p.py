@@ -18,6 +18,7 @@ import torch
 try:
     import hivemind
     from hivemind import DHT, RemoteExpert, Server
+
     HIVEMIND_AVAILABLE = True
 except ImportError:
     HIVEMIND_AVAILABLE = False
@@ -45,9 +46,7 @@ class P2PLayer:
 
     def __init__(self, config, shard_manager):
         if not HIVEMIND_AVAILABLE:
-            raise RuntimeError(
-                "hivemind is not installed. Run: pip install hivemind"
-            )
+            raise RuntimeError("hivemind is not installed. Run: pip install hivemind")
         self.config = config
         self.shard_manager = shard_manager
         self.dht: DHT | None = None
@@ -56,8 +55,6 @@ class P2PLayer:
 
     async def start(self) -> None:
         public_host = self.config.public_host or self.config.listen_host
-        announce_addr = f"{public_host}:{self.config.listen_port}"
-
         initial_peers = self.config.dht_bootstrap_peers or []
 
         self.dht = hivemind.DHT(
@@ -91,9 +88,7 @@ class P2PLayer:
         """Find a live node hosting the given shard index for our model."""
         key = f"shard.{self.config.model_name}.{shard_index}"
         try:
-            peer_data = await asyncio.get_event_loop().run_in_executor(
-                None, self.dht.get, key
-            )
+            peer_data = await asyncio.get_event_loop().run_in_executor(None, self.dht.get, key)
             if peer_data:
                 return RemoteShardClient(peer_data["endpoint"])
         except Exception as exc:

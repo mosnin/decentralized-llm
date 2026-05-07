@@ -1,15 +1,10 @@
 """Tests for ECIES prompt encryption/decryption."""
 
 import hashlib
-import os
+
 import pytest
 
-from node.encryption import (
-    decrypt_prompt,
-    ed25519_privkey_to_x25519,
-    ed25519_pubkey_to_x25519,
-    encrypt_prompt,
-)
+from node.encryption import decrypt_prompt, encrypt_prompt
 
 
 def _make_ed25519_keypair():
@@ -19,6 +14,7 @@ def _make_ed25519_keypair():
     priv = Ed25519PrivateKey.generate()
     priv_seed = priv.private_bytes_raw()
     from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
     pub_bytes = priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
     return priv_seed, pub_bytes
 
@@ -29,9 +25,7 @@ class TestEncryption:
         prompt = "What is the capital of France?"
 
         blob = encrypt_prompt(prompt, pub_bytes)
-        recovered = decrypt_prompt(
-            blob, priv_seed, hashlib.sha256(prompt.encode()).digest()
-        )
+        recovered = decrypt_prompt(blob, priv_seed, hashlib.sha256(prompt.encode()).digest())
         assert recovered == prompt
 
     def test_wrong_hash_raises(self):
@@ -72,9 +66,7 @@ class TestEncryption:
         prompt = "Explain 量子纠缠 (quantum entanglement) in simple terms 🔬"
 
         blob = encrypt_prompt(prompt, pub_bytes)
-        recovered = decrypt_prompt(
-            blob, priv_seed, hashlib.sha256(prompt.encode("utf-8")).digest()
-        )
+        recovered = decrypt_prompt(blob, priv_seed, hashlib.sha256(prompt.encode("utf-8")).digest())
         assert recovered == prompt
 
     def test_blob_structure(self):

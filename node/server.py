@@ -14,14 +14,8 @@ the provider-assigned public IP before launching.
 
 import asyncio
 import hashlib
-import io
-import json
 import logging
-import os
 import signal
-import sys
-import time
-
 
 import torch
 
@@ -50,8 +44,12 @@ class Node:
 
     async def start(self) -> None:
         logger.info("=== Decentralized LLM Node starting ===")
-        logger.info("Model: %s  Shard: %d/%d", self.config.model_name,
-                    self.config.shard_index, self.config.num_shards)
+        logger.info(
+            "Model: %s  Shard: %d/%d",
+            self.config.model_name,
+            self.config.shard_index,
+            self.config.num_shards,
+        )
 
         self.shard_mgr.load()
 
@@ -107,9 +105,7 @@ class Node:
         # Store result on decentralized storage (IPFS via web3.storage or Arweave)
         result_cid = await self._upload_result(job.job_id, result_text)
 
-        await self.blockchain.submit_result(
-            job, result_text.encode(), result_cid
-        )
+        await self.blockchain.submit_result(job, result_text.encode(), result_cid)
 
     # ────────────────────────── inference ────────────────────────────────────
 
@@ -132,9 +128,7 @@ class Node:
 
         if self.config.shard_index == 0:
             prompt = await self._fetch_prompt(job)
-            input_ids = await loop.run_in_executor(
-                None, self._tokenize, prompt
-            )
+            input_ids = await loop.run_in_executor(None, self._tokenize, prompt)
             hidden = await loop.run_in_executor(None, self.shard_mgr.embed, input_ids)
         else:
             hidden = await self._receive_activations(job.job_id)
@@ -149,9 +143,7 @@ class Node:
             return str(result)  # downstream shard returns final text
         else:
             # Last shard: generate tokens autoregressively
-            return await loop.run_in_executor(
-                None, self._generate, hidden, job.max_tokens
-            )
+            return await loop.run_in_executor(None, self._generate, hidden, job.max_tokens)
 
     def _tokenize(self, prompt: str) -> torch.Tensor:
         tokens = self.shard_mgr.tokenizer(
@@ -207,7 +199,7 @@ class Node:
         gpu_count = torch.cuda.device_count() or 1
         vram_gb = 0
         if torch.cuda.is_available():
-            vram_gb = torch.cuda.get_device_properties(0).total_memory // (1024 ** 3)
+            vram_gb = torch.cuda.get_device_properties(0).total_memory // (1024**3)
 
         public_host = self.config.public_host or self.config.listen_host
         endpoint = f"{public_host}:{self.config.listen_port}"
@@ -225,6 +217,7 @@ class Node:
 
 
 # ────────────────────────── entrypoint ───────────────────────────────────────
+
 
 def main():
     config = NodeConfig()

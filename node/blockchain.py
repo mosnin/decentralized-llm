@@ -8,19 +8,17 @@ Responsibilities:
   - Heartbeat to keep the DHT registration alive
 """
 
-import asyncio
 import hashlib
-import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-
 try:
-    from solders.keypair import Keypair
-    from solders.pubkey import Pubkey
     from anchorpy import Program, Provider, Wallet
     from solana.rpc.async_api import AsyncClient
+    from solders.keypair import Keypair
+    from solders.pubkey import Pubkey
+
     SOLANA_AVAILABLE = True
 except ImportError:
     SOLANA_AVAILABLE = False
@@ -126,9 +124,7 @@ class BlockchainClient:
             logger.warning("Failed to claim job %d: %s", job.job_id, exc)
             return False
 
-    async def submit_result(
-        self, job: OpenJob, result_bytes: bytes, result_cid: str
-    ) -> bool:
+    async def submit_result(self, job: OpenJob, result_bytes: bytes, result_cid: str) -> bool:
         """Hash the result and submit it on-chain."""
         if not self._inference_program:
             return False
@@ -170,9 +166,7 @@ class BlockchainClient:
                 gpu_count,
                 [[int(b) for b in mid] for mid in model_ids],
                 stake_amount,
-                ctx=self._registry_program.context(
-                    accounts={"operator": self._wallet.public_key}
-                ),
+                ctx=self._registry_program.context(accounts={"operator": self._wallet.public_key}),
             )
             logger.info("Registered node in compute-registry")
             return True

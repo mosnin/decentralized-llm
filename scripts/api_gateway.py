@@ -13,14 +13,12 @@ Endpoints:
 import os
 from contextlib import asynccontextmanager
 
-
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from client.python import DecentralizedLLMClient
 from integrations.paysh import PayshHandler
-
 
 # ────────────────────────── startup / shutdown ────────────────────────────────
 
@@ -63,6 +61,7 @@ app.add_middleware(
 
 # ────────────────────────── schemas ──────────────────────────────────────────
 
+
 class CompletionRequest(BaseModel):
     model: str = "llama-3.2-3b"
     prompt: str
@@ -84,6 +83,7 @@ class PaymentLinkRequest(BaseModel):
 
 # ────────────────────────── endpoints ────────────────────────────────────────
 
+
 @app.get("/v1/models")
 async def list_models():
     return {
@@ -91,7 +91,7 @@ async def list_models():
             {"id": "llama-3.2-1b", "description": "LLaMA 3.2 1B — fastest, lowest cost"},
             {"id": "llama-3.2-3b", "description": "LLaMA 3.2 3B — balanced"},
             {"id": "llama-3.1-8b", "description": "LLaMA 3.1 8B — highest quality"},
-            {"id": "mistral-7b",   "description": "Mistral 7B v0.3"},
+            {"id": "mistral-7b", "description": "Mistral 7B v0.3"},
         ]
     }
 
@@ -158,9 +158,9 @@ async def health():
 
 # ────────────────────────── payment callback ─────────────────────────────────
 
+
 def _handle_payment(event):
     """Called when Pay.sh confirms a completed payment. Mint tokens on-chain."""
-    import asyncio
     # TODO: call SPL token mint instruction for event.tokens_to_mint
     # to event.customer_wallet using the DAO treasury mint authority
     print(f"Minting {event.tokens_to_mint} tokens to {event.customer_wallet}")

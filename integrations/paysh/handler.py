@@ -17,8 +17,8 @@ import hmac
 import json
 import logging
 import time
-from dataclasses import dataclass
 from collections.abc import Callable
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -31,11 +31,11 @@ TOKENS_PER_USD_CENT = 100
 class PaymentEvent:
     payment_id: str
     amount_usd_cents: int
-    currency: str          # "usd", "eur", "sol", "usdc", etc.
-    customer_wallet: str   # Solana wallet address to receive tokens
+    currency: str  # "usd", "eur", "sol", "usdc", etc.
+    customer_wallet: str  # Solana wallet address to receive tokens
     tokens_to_mint: int
     timestamp: int
-    status: str            # "completed", "refunded", "failed"
+    status: str  # "completed", "refunded", "failed"
 
 
 class PayshHandler:
@@ -109,16 +109,18 @@ class PayshHandler:
         """
         import urllib.request
 
-        payload = json.dumps({
-            "amount": amount_usd_cents,
-            "currency": "usd",
-            "description": description,
-            "metadata": {
-                "solana_wallet": customer_wallet,
-                "tokens_to_receive": amount_usd_cents * TOKENS_PER_USD_CENT,
-            },
-            "redirect_url": redirect_url,
-        }).encode()
+        payload = json.dumps(
+            {
+                "amount": amount_usd_cents,
+                "currency": "usd",
+                "description": description,
+                "metadata": {
+                    "solana_wallet": customer_wallet,
+                    "tokens_to_receive": amount_usd_cents * TOKENS_PER_USD_CENT,
+                },
+                "redirect_url": redirect_url,
+            }
+        ).encode()
 
         req = urllib.request.Request(
             "https://api.pay.sh/v1/payment-links",
@@ -140,9 +142,7 @@ class PayshHandler:
     # ────────────────────────── private ──────────────────────────────────────
 
     def _verify_signature(self, body: bytes, signature: str) -> None:
-        expected = hmac.new(
-            self.webhook_secret.encode(), body, hashlib.sha256
-        ).hexdigest()
+        expected = hmac.new(self.webhook_secret.encode(), body, hashlib.sha256).hexdigest()
         if not hmac.compare_digest(expected, signature):
             raise ValueError("Invalid Pay.sh webhook signature")
 

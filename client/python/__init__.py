@@ -1,3 +1,3 @@
-from .client import DecentralizedLLMClient, CompletionResponse
+from .client import CompletionResponse, DecentralizedLLMClient
 
 __all__ = ["DecentralizedLLMClient", "CompletionResponse"]
