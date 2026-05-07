@@ -9,7 +9,6 @@ Supports:
 
 import json
 from pathlib import Path
-from typing import Union
 
 import torch
 from torch.utils.data import Dataset
@@ -24,7 +23,7 @@ class LocalDataset(Dataset):
 
     def __init__(
         self,
-        data_path: Union[str, Path],
+        data_path: str | Path,
         tokenizer: PreTrainedTokenizer,
         max_length: int = 512,
     ):

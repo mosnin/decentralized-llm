@@ -21,7 +21,7 @@ import os
 import signal
 import sys
 import time
-from typing import Optional
+
 
 import torch
 
@@ -38,11 +38,11 @@ logger = logging.getLogger(__name__)
 
 
 class Node:
-    def __init__(self, config: Optional[NodeConfig] = None):
+    def __init__(self, config: NodeConfig | None = None):
         self.config = config or NodeConfig()
         self.shard_mgr = ShardManager(self.config)
         self.blockchain = BlockchainClient(self.config)
-        self.p2p: Optional[P2PLayer] = None
+        self.p2p: P2PLayer | None = None
         self._running = False
         self._active_jobs: dict[int, asyncio.Task] = {}
 

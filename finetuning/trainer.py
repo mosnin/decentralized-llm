@@ -16,7 +16,7 @@ Tokenomics:
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+
 
 import torch
 import torch.nn as nn
@@ -85,9 +85,9 @@ class FederatedTrainer:
             raise RuntimeError("pip install hivemind")
 
         self.config = config
-        self.model: Optional[nn.Module] = None
-        self.optimizer: Optional[hivemind.Optimizer] = None
-        self.dht: Optional[hivemind.DHT] = None
+        self.model: nn.Module | None = None
+        self.optimizer: hivemind.Optimizer | None = None
+        self.dht: hivemind.DHT | None = None
         self.tokenizer = None
 
     def setup(self) -> None:
@@ -232,7 +232,7 @@ class FederatedTrainer:
         The running mean is maintained locally as a simple EMA.
         """
         if not hasattr(self, "_grad_ema"):
-            self._grad_ema: Optional[torch.Tensor] = None
+            self._grad_ema: torch.Tensor | None = None
 
         flat = torch.cat([p.grad.view(-1) for p in params if p.grad is not None])
 

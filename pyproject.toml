@@ -25,8 +25,9 @@ dependencies = [
     # Fine-tuning
     "peft>=0.10.0",          # LoRA adapters
 
-    # Storage
-    "ipfshttpclient>=0.8.0", # IPFS for result/prompt storage
+    # Storage (Lighthouse: IPFS + Filecoin)
+    "lighthouseweb3>=0.1.5",
+    "aiohttp>=3.9.0",
 
     # API server
     "fastapi>=0.111.0",

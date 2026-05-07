@@ -12,7 +12,7 @@ Endpoints:
 
 import os
 from contextlib import asynccontextmanager
-from typing import Optional
+
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,8 +24,8 @@ from integrations.paysh import PayshHandler
 
 # ────────────────────────── startup / shutdown ────────────────────────────────
 
-_client: Optional[DecentralizedLLMClient] = None
-_paysh: Optional[PayshHandler] = None
+_client: DecentralizedLLMClient | None = None
+_paysh: PayshHandler | None = None
 
 
 @asynccontextmanager
@@ -67,7 +67,7 @@ class CompletionRequest(BaseModel):
     model: str = "llama-3.2-3b"
     prompt: str
     max_tokens: int = 512
-    payment_amount: Optional[int] = None
+    payment_amount: int | None = None
 
 
 class VoteRequest(BaseModel):

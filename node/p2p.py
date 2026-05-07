@@ -12,7 +12,6 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 
@@ -51,8 +50,8 @@ class P2PLayer:
             )
         self.config = config
         self.shard_manager = shard_manager
-        self.dht: Optional[DHT] = None
-        self.server: Optional[Server] = None
+        self.dht: DHT | None = None
+        self.server: Server | None = None
         self._peer_cache: dict[str, PeerInfo] = {}
 
     async def start(self) -> None:
@@ -88,7 +87,7 @@ class P2PLayer:
         if self.dht:
             self.dht.shutdown()
 
-    async def get_next_shard_peer(self, shard_index: int) -> Optional["RemoteShardClient"]:
+    async def get_next_shard_peer(self, shard_index: int) -> "RemoteShardClient | None":
         """Find a live node hosting the given shard index for our model."""
         key = f"shard.{self.config.model_name}.{shard_index}"
         try:
@@ -138,7 +137,7 @@ class RemoteShardClient:
 
     def __init__(self, endpoint: str):
         self.endpoint = endpoint
-        self._expert: Optional[RemoteExpert] = None
+        self._expert: RemoteExpert | None = None
 
     def _ensure_expert(self) -> RemoteExpert:
         if self._expert is None:

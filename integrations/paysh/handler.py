@@ -18,7 +18,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Callable, Optional
+from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +64,7 @@ class PayshHandler:
         self,
         api_key: str,
         webhook_secret: str,
-        on_payment: Optional[Callable[[PaymentEvent], None]] = None,
+        on_payment: Callable[[PaymentEvent], None] | None = None,
     ):
         self.api_key = api_key
         self.webhook_secret = webhook_secret

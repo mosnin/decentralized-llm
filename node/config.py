@@ -1,6 +1,5 @@
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 import os
 
 
@@ -20,7 +19,7 @@ class NodeConfig:
     # On rented GPU instances, set this to the public IP/port assigned by the provider
     listen_host: str = os.getenv("LISTEN_HOST", "0.0.0.0")
     listen_port: int = int(os.getenv("LISTEN_PORT", "7070"))
-    public_host: Optional[str] = os.getenv("PUBLIC_HOST")  # set by GPU rental provider env
+    public_host: str | None = os.getenv("PUBLIC_HOST")  # set by GPU rental provider env
     dht_bootstrap_peers: list[str] = field(default_factory=lambda: [
         p for p in os.getenv("DHT_BOOTSTRAP_PEERS", "").split(",") if p
     ])

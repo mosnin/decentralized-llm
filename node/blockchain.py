@@ -14,7 +14,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+
 
 try:
     from solders.keypair import Keypair
@@ -47,10 +47,10 @@ class BlockchainClient:
                 "Solana packages not installed. Run: pip install anchorpy solders solana"
             )
         self.config = config
-        self._client: Optional[AsyncClient] = None
-        self._wallet: Optional[Wallet] = None
-        self._inference_program: Optional[Program] = None
-        self._registry_program: Optional[Program] = None
+        self._client: AsyncClient | None = None
+        self._wallet: Wallet | None = None
+        self._inference_program: Program | None = None
+        self._registry_program: Program | None = None
 
     async def connect(self) -> None:
         keypair = Keypair.from_json(Path(self.config.wallet_path).read_text())

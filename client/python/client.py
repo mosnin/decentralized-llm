@@ -15,7 +15,7 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncIterator, Optional
+
 
 try:
     from solders.keypair import Keypair
@@ -60,8 +60,8 @@ class DecentralizedLLMClient:
         self.rpc_url = rpc_url
         keypair = Keypair.from_json(Path(wallet_path).expanduser().read_text())
         self._wallet = Wallet(keypair)
-        self._client: Optional[AsyncClient] = None
-        self._program: Optional[Program] = None
+        self._client: AsyncClient | None = None
+        self._program: Program | None = None
 
     async def __aenter__(self):
         self._client = AsyncClient(self.rpc_url)
@@ -80,7 +80,7 @@ class DecentralizedLLMClient:
         prompt: str,
         model: str = "llama-3.2-3b",
         max_tokens: int = 512,
-        payment_amount: Optional[int] = None,
+        payment_amount: int | None = None,
         deadline_seconds: int = 120,
     ) -> CompletionResponse:
         """

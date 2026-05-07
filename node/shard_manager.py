@@ -12,7 +12,7 @@ Shard N-1 additionally runs the LM head / final layer norm.
 
 import logging
 from pathlib import Path
-from typing import Optional
+
 
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
@@ -25,7 +25,7 @@ class ShardManager:
         self.config = config
         self.model = None
         self.tokenizer = None
-        self.layer_slice: Optional[tuple[int, int]] = None
+        self.layer_slice: tuple[int, int] | None = None
 
     def load(self) -> None:
         """Download (if needed) and load this node's model shard into GPU memory."""
