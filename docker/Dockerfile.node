@@ -1,0 +1,20 @@
+FROM nvidia/cuda:12.4.0-runtime-ubuntu22.04
+
+# System deps
+RUN apt-get update && apt-get install -y \
+    python3.11 python3.11-dev python3-pip curl git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY pyproject.toml ./
+COPY node/ ./node/
+COPY integrations/ ./integrations/
+
+RUN pip install --no-cache-dir -e ".[dev]"
+
+# Pre-download model weights at build time for faster startup (optional)
+# RUN python -c "from transformers import AutoModelForCausalLM; AutoModelForCausalLM.from_pretrained('meta-llama/Llama-3.2-3B')"
+
+EXPOSE 7070
+
+CMD ["python", "-m", "node.server"]

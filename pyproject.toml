@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "decentralized-llm"
+version = "0.1.0"
+description = "Decentralized, community-owned LLM inference and fine-tuning network"
+requires-python = ">=3.11"
+dependencies = [
+    # Solana / Anchor
+    "anchorpy>=0.20.0",
+    "solders>=0.21.0",
+    "solana>=0.34.0",
+
+    # P2P / distributed ML
+    "hivemind>=1.1.0",
+
+    # Model serving
+    "torch>=2.2.0",
+    "transformers>=4.40.0",
+    "accelerate>=0.30.0",
+    "bitsandbytes>=0.43.0",  # int8/int4 quantization for GPU-constrained nodes
+
+    # Fine-tuning
+    "peft>=0.10.0",          # LoRA adapters
+
+    # Storage
+    "ipfshttpclient>=0.8.0", # IPFS for result/prompt storage
+
+    # API server
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.29.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-mock>=3.14.0",
+    "ruff>=0.4.0",
+    "mypy>=1.10.0",
+]
+
+[project.scripts]
+decentralized-llm-node = "node.server:main"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
