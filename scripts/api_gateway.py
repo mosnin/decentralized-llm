@@ -30,6 +30,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from client.python import DecentralizedLLMClient
 from integrations.paysh import PayshHandler
 from node.logging_config import configure_logging, set_correlation_id
+from node.network_stats import NetworkStatsCollector
 
 configure_logging()
 
@@ -38,6 +39,7 @@ configure_logging()
 _client: DecentralizedLLMClient | None = None
 _paysh: PayshHandler | None = None
 _start_time: float = time.time()
+_stats_collector = NetworkStatsCollector()
 
 
 @asynccontextmanager
@@ -420,6 +422,23 @@ async def get_job_status(job_id: int):
         )
     except Exception as exc:
         raise HTTPException(status_code=404, detail=f"Job not found: {exc}")
+
+
+@app.get("/v1/network/stats", tags=["ops"])
+async def network_stats():
+    """Return aggregate health statistics for the decentralized network."""
+    snap = _stats_collector.snapshot()
+    success_rate = snap.completed_jobs_24h / snap.total_jobs_24h if snap.total_jobs_24h > 0 else 0.0
+    return {
+        "timestamp": snap.timestamp,
+        "total_nodes": snap.total_nodes,
+        "active_nodes": snap.active_nodes,
+        "total_jobs_24h": snap.total_jobs_24h,
+        "completed_jobs_24h": snap.completed_jobs_24h,
+        "success_rate": success_rate,
+        "avg_latency_ms": snap.avg_latency_ms,
+        "models_available": snap.models_available,
+    }
 
 
 # ────────────────────────── helpers ──────────────────────────────────────────
