@@ -95,7 +95,7 @@ class TestReadinessEndpoint:
 
         import asyncio
 
-        result = asyncio.get_event_loop().run_until_complete(_run())
+        result = asyncio.run(_run())
         assert result["checks"]["job_queue"] == "degraded"
         assert result["status"] == "degraded"
 
@@ -114,7 +114,7 @@ class TestHealthCheckerUnit:
 
         import asyncio
 
-        result = asyncio.get_event_loop().run_until_complete(_run())
+        result = asyncio.run(_run())
         assert isinstance(result, dict)
         assert "status" in result
         assert "checks" in result
@@ -141,6 +141,6 @@ class TestHealthCheckerUnit:
 
         import asyncio
 
-        result = asyncio.get_event_loop().run_until_complete(_run())
+        result = asyncio.run(_run())
         assert result["checks"]["ipfs"] == "ok"
         assert result["checks"]["shard_manager"] == "ok"
