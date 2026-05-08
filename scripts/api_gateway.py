@@ -14,8 +14,11 @@ Endpoints:
 """
 
 import asyncio
+import json
 import os
 import time
+import uuid
+from collections import defaultdict
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
@@ -76,6 +79,26 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ────────────────────────── rate limiting ────────────────────────────────────
+
+_rate_buckets: dict = defaultdict(lambda: {"count": 0, "window_start": time.time()})
+_RATE_LIMIT = int(os.environ.get("RATE_LIMIT_PER_MIN", "60"))
+
+
+def _check_rate_limit(ip: str) -> None:
+    bucket = _rate_buckets[ip]
+    now = time.time()
+    if now - bucket["window_start"] > 60:
+        bucket["count"] = 0
+        bucket["window_start"] = now
+    bucket["count"] += 1
+    if bucket["count"] > _RATE_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded ({_RATE_LIMIT} req/min). Slow down.",
+            headers={"Retry-After": "60"},
+        )
 
 
 # ────────────────────────── metrics ──────────────────────────────────────────
@@ -164,8 +187,10 @@ async def list_models():
 
 
 @app.post("/v1/completions")
-async def create_completion(req: CompletionRequest):
+async def create_completion(req: CompletionRequest, request: Request):
+    _check_rate_limit(request.client.host if request.client else "unknown")
     _metrics["requests_total"] += 1
+    completion_id = f"cmpl-{uuid.uuid4().hex[:12]}"
     try:
         result = await _client.complete(
             prompt=req.prompt,
@@ -175,17 +200,18 @@ async def create_completion(req: CompletionRequest):
         )
         _metrics["requests_success"] += 1
         _metrics["tokens_generated"] += result.tokens_used
+
+        if req.stream:
+            return StreamingResponse(
+                _stream_completion(completion_id, result, object_type="text_completion"),
+                media_type="text/event-stream",
+            )
+
         return {
-            "id": f"cmpl-{result.job_id}",
+            "id": completion_id,
             "object": "text_completion",
             "model": result.model,
-            "choices": [
-                {
-                    "text": result.text,
-                    "index": 0,
-                    "finish_reason": "stop",
-                }
-            ],
+            "choices": [{"text": result.text, "index": 0, "finish_reason": "stop"}],
             "usage": {
                 "prompt_tokens": 0,
                 "completion_tokens": result.tokens_used,
@@ -203,15 +229,16 @@ async def create_completion(req: CompletionRequest):
 
 
 @app.post("/v1/chat/completions")
-async def create_chat_completion(req: ChatCompletionRequest):
+async def create_chat_completion(req: ChatCompletionRequest, request: Request):
     """
-    OpenAI-compatible chat completions endpoint.
+    OpenAI-compatible chat completions endpoint with optional SSE streaming.
 
     Messages are concatenated into a single prompt using the standard
     ChatML format so any OpenAI client library works out-of-the-box.
     """
+    _check_rate_limit(request.client.host if request.client else "unknown")
     _metrics["requests_total"] += 1
-    # Build prompt from chat messages (ChatML format)
+    chat_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     prompt = _build_chatml(req.messages)
 
     try:
@@ -223,9 +250,16 @@ async def create_chat_completion(req: ChatCompletionRequest):
         )
         _metrics["requests_success"] += 1
         _metrics["tokens_generated"] += result.tokens_used
+
+        if req.stream:
+            return StreamingResponse(
+                _stream_chat_completion(chat_id, result, prompt),
+                media_type="text/event-stream",
+            )
+
         created = int(time.time())
         return {
-            "id": f"chatcmpl-{result.job_id}",
+            "id": chat_id,
             "object": "chat.completion",
             "created": created,
             "model": result.model,
@@ -330,7 +364,78 @@ async def prometheus_metrics():
     )
 
 
+@app.get("/v1/jobs/{job_id}")
+async def get_job_status(job_id: int):
+    """Poll on-chain job status. Useful for clients that prefer polling over waiting."""
+    if _client is None:
+        raise HTTPException(status_code=503, detail="Blockchain client not connected")
+    try:
+        job_pda = _client._job_pda(job_id)
+        job = await _client._program.account["Job"].fetch(job_pda)
+        return {
+            "job_id": job_id,
+            "status": str(job.status),
+            "node": str(job.node),
+            "result_cid": job.result_cid,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=f"Job not found: {exc}")
+
+
 # ────────────────────────── helpers ──────────────────────────────────────────
+
+
+async def _stream_completion(completion_id: str, result, object_type: str):
+    """Yield SSE chunks for a text completion (word-by-word)."""
+    words = result.text.split(" ")
+    for i, word in enumerate(words):
+        chunk_text = word if i == len(words) - 1 else word + " "
+        chunk = {
+            "id": completion_id,
+            "object": object_type,
+            "model": result.model,
+            "choices": [{"text": chunk_text, "index": 0, "finish_reason": None}],
+        }
+        yield f"data: {json.dumps(chunk)}\n\n"
+        await asyncio.sleep(0)  # yield control back to event loop
+    # Final chunk with finish_reason
+    final = {
+        "id": completion_id,
+        "object": object_type,
+        "model": result.model,
+        "choices": [{"text": "", "index": 0, "finish_reason": "stop"}],
+    }
+    yield f"data: {json.dumps(final)}\n\n"
+    yield "data: [DONE]\n\n"
+
+
+async def _stream_chat_completion(chat_id: str, result, prompt: str):
+    """Yield SSE chunks for a chat completion (word-by-word)."""
+    words = result.text.split(" ")
+    for i, word in enumerate(words):
+        chunk_content = word if i == len(words) - 1 else word + " "
+        chunk = {
+            "id": chat_id,
+            "object": "chat.completion.chunk",
+            "model": result.model,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"role": "assistant", "content": chunk_content},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        yield f"data: {json.dumps(chunk)}\n\n"
+        await asyncio.sleep(0)
+    final = {
+        "id": chat_id,
+        "object": "chat.completion.chunk",
+        "model": result.model,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+    }
+    yield f"data: {json.dumps(final)}\n\n"
+    yield "data: [DONE]\n\n"
 
 
 def _build_chatml(messages: list[ChatMessage]) -> str:
