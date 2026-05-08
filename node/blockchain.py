@@ -8,6 +8,7 @@ Responsibilities:
   - Heartbeat to keep the DHT registration alive
 """
 
+import asyncio
 import hashlib
 import logging
 from dataclasses import dataclass
@@ -227,6 +228,50 @@ class BlockchainClient:
             logger.warning("auto_settle scan failed: %s", exc)
 
         return settled
+
+    async def watch_for_challenges(self, job_id: int) -> bool:
+        """
+        Poll the on-chain job account for up to 5 minutes watching for a status
+        change to "Disputed".
+
+        Returns True if the job was challenged within the window, False if the
+        challenge window passed without a dispute.
+
+        This is a placeholder that wraps the on-chain dispute logic already
+        implemented in the Rust inference-market program.
+        """
+        if not self._inference_program:
+            return False
+
+        import time
+
+        challenge_window_seconds = 300  # matches CHALLENGE_WINDOW_SECONDS in Rust
+        poll_interval = 5.0
+        deadline = time.monotonic() + challenge_window_seconds
+
+        while time.monotonic() < deadline:
+            try:
+                from solders.pubkey import Pubkey
+
+                seeds = [b"job", job_id.to_bytes(8, "little")]
+                job_pda, _ = Pubkey.find_program_address(
+                    seeds,
+                    Pubkey.from_string(self.config.inference_market_program),
+                )
+                account = await self._inference_program.account["Job"].fetch(job_pda)
+                status = str(account.status)
+                if "Disputed" in status:
+                    logger.info("Job %d was challenged (status: Disputed)", job_id)
+                    return True
+                if "Completed" in status or "Refunded" in status:
+                    # Settled without dispute
+                    return False
+            except Exception as exc:
+                logger.warning("watch_for_challenges: failed to fetch job %d: %s", job_id, exc)
+            await __import__("asyncio").sleep(poll_interval)
+
+        logger.info("Job %d: challenge window closed without dispute", job_id)
+        return False
 
     async def close(self) -> None:
         if self._client:

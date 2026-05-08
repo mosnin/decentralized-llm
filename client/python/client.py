@@ -98,17 +98,21 @@ class DecentralizedLLMClient:
         max_tokens: int = 512,
         payment_amount: int | None = None,
         deadline_seconds: int = 120,
+        max_node_retries: int = 2,
     ) -> CompletionResponse:
         """
         Post an inference job on-chain and wait for a node to complete it.
 
         End-to-end privacy flow:
-          1. Query compute registry for the best available node for this model
-          2. Encrypt prompt with that node's Ed25519 wallet pubkey (ECIES/X25519)
+          1. Query compute registry for up to max_node_retries+1 candidate nodes
+          2. Encrypt prompt with the chosen node's Ed25519 wallet pubkey (ECIES/X25519)
           3. Upload encrypted blob to IPFS (CID committed on-chain alongside hash)
           4. Post job → node downloads blob, decrypts, runs inference
           5. Node uploads result to IPFS, submits result_hash on-chain
           6. Client downloads result from IPFS and returns it
+
+        If the first node times out, the job is re-posted targeting the next
+        candidate node (encrypting the prompt afresh for the new key).
         """
         model_id = MODEL_IDS.get(model)
         if model_id is None:
@@ -117,42 +121,54 @@ class DecentralizedLLMClient:
         if payment_amount is None:
             payment_amount = self._estimate_cost(max_tokens)
 
-        # Step 1: find best node for this model
-        node_pubkey_bytes = await self._find_best_node(model_id)
-
-        # Step 2: encrypt prompt for that node
         from node.encryption import encrypt_prompt
 
         prompt_bytes = prompt.encode("utf-8")
         prompt_hash = list(hashlib.sha256(prompt_bytes).digest())
-        encrypted_blob = encrypt_prompt(prompt, node_pubkey_bytes)
 
-        # Step 3: upload encrypted blob to IPFS
-        prompt_cid = await self._upload_prompt(encrypted_blob)
+        # Get a ranked list of candidate nodes for fallback retries
+        candidates = await self._find_candidate_nodes(model_id, k=max_node_retries + 1)
+        if not candidates:
+            candidates = [await self._find_best_node(model_id)]
 
-        deadline = int(time.time()) + deadline_seconds
+        last_exc: Exception = RuntimeError("No nodes available")
+        for attempt, node_pubkey_bytes in enumerate(candidates):
+            try:
+                encrypted_blob = encrypt_prompt(prompt, node_pubkey_bytes)
+                prompt_cid = await self._upload_prompt(encrypted_blob)
+                deadline = int(time.time()) + deadline_seconds
 
-        # Step 4: post job on-chain
-        job_id = await self._post_job(
-            model_id=list(model_id),
-            prompt_hash=prompt_hash,
-            prompt_cid=prompt_cid,
-            max_tokens=max_tokens,
-            payment_amount=payment_amount,
-            deadline=deadline,
-        )
+                job_id = await self._post_job(
+                    model_id=list(model_id),
+                    prompt_hash=prompt_hash,
+                    prompt_cid=prompt_cid,
+                    max_tokens=max_tokens,
+                    payment_amount=payment_amount,
+                    deadline=deadline,
+                )
 
-        # Step 5+6: wait for result and download it
-        result = await self._wait_for_result(job_id, deadline)
+                result = await self._wait_for_result(job_id, deadline)
+                return CompletionResponse(
+                    text=result["text"],
+                    job_id=job_id,
+                    model=model,
+                    tokens_used=result["tokens_used"],
+                    total_paid=payment_amount,
+                    node=result["node"],
+                )
+            except TimeoutError as exc:
+                last_exc = exc
+                if attempt < len(candidates) - 1:
+                    import logging
 
-        return CompletionResponse(
-            text=result["text"],
-            job_id=job_id,
-            model=model,
-            tokens_used=result["tokens_used"],
-            total_paid=payment_amount,
-            node=result["node"],
-        )
+                    logging.getLogger(__name__).warning(
+                        "Node %s timed out on attempt %d, retrying with next candidate",
+                        node_pubkey_bytes.hex()[:16],
+                        attempt + 1,
+                    )
+                continue
+
+        raise last_exc
 
     async def get_governance_proposals(self) -> list[dict]:
         """Fetch all active governance proposals."""
@@ -233,10 +249,42 @@ class DecentralizedLLMClient:
     async def _find_best_node(self, model_id: bytes) -> bytes:
         """
         Query compute registry for registered nodes that serve this model.
-        Returns the Ed25519 pubkey bytes of the best node (highest reputation).
+
+        Selection strategy:
+          1. Filter to nodes with stake > 0 that serve this model
+          2. Exclude nodes with more than 10% dispute rate (jobs_disputed / jobs_completed)
+          3. Among remaining, pick highest reputation score
+          4. Returns the Ed25519 pubkey bytes of the chosen node
         """
         if self._registry is None:
             raise RuntimeError("Not connected — use 'async with client'")
+        try:
+            nodes = await self._registry.account["NodeRecord"].all()
+            eligible = []
+            for n in nodes:
+                if not any(bytes(mid) == model_id for mid in n.account.model_ids):
+                    continue
+                if n.account.staked_amount <= 0:
+                    continue
+                # Skip nodes with high dispute rate
+                completed = getattr(n.account, "jobs_completed", 0)
+                disputed = getattr(n.account, "jobs_disputed", 0)
+                if completed > 10 and disputed / completed > 0.10:
+                    continue
+                eligible.append(n)
+
+            if not eligible:
+                raise RuntimeError(f"No registered nodes found for model {model_id.hex()[:8]}…")
+            # Pick highest reputation
+            best = max(eligible, key=lambda n: n.account.reputation)
+            return bytes(best.public_key)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to find node: {exc}") from exc
+
+    async def _find_candidate_nodes(self, model_id: bytes, k: int = 3) -> list[bytes]:
+        """Return the top-k node pubkeys by reputation for fallback handling."""
+        if self._registry is None:
+            return []
         try:
             nodes = await self._registry.account["NodeRecord"].all()
             eligible = [
@@ -245,13 +293,10 @@ class DecentralizedLLMClient:
                 if any(bytes(mid) == model_id for mid in n.account.model_ids)
                 and n.account.staked_amount > 0
             ]
-            if not eligible:
-                raise RuntimeError(f"No registered nodes found for model {model_id.hex()[:8]}…")
-            # Pick highest reputation
-            best = max(eligible, key=lambda n: n.account.reputation)
-            return bytes(best.public_key)
-        except Exception as exc:
-            raise RuntimeError(f"Failed to find node: {exc}") from exc
+            eligible.sort(key=lambda n: n.account.reputation, reverse=True)
+            return [bytes(n.public_key) for n in eligible[:k]]
+        except Exception:
+            return []
 
     async def _upload_prompt(self, blob: bytes) -> str:
         """

@@ -23,12 +23,17 @@ from .encryption import decrypt_prompt
 from .p2p import P2PLayer
 from .shard_manager import ShardManager
 from .storage import StorageClient
+from .verifier import ResultVerifier
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+_MAX_RETRIES = 2
+_RETRY_DELAY = 5.0
+_IPFS_CIRCUIT_BREAKER_THRESHOLD = 3
 
 
 class Node:
@@ -39,7 +44,12 @@ class Node:
         self.storage: StorageClient | None = None
         self.p2p: P2PLayer | None = None
         self._running = False
-        self._active_jobs: dict[int, asyncio.Task] = {}
+        # Maps job_id → True for all jobs currently queued or being handled.
+        # Used for deduplication across both the queue and active workers.
+        self._active_jobs: dict[int, bool] = {}
+        # Priority queue: items are (priority_key, job) where priority_key is
+        # the negated payment_amount so highest-paying jobs sort first.
+        self._job_queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
 
     # ────────────────────────── lifecycle ────────────────────────────────────
 
@@ -64,18 +74,27 @@ class Node:
         await self.p2p.start()
 
         self._running = True
-        logger.info("Node ready. Starting job poll loop.")
+        logger.info(
+            "Node ready. Starting job poll loop with %d workers.",
+            self.config.max_concurrent_jobs,
+        )
+
+        # Start N worker coroutines that drain the priority queue.
+        worker_tasks = [
+            asyncio.create_task(self._job_worker(worker_id=i))
+            for i in range(self.config.max_concurrent_jobs)
+        ]
         heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         try:
             await self._job_loop()
         finally:
             heartbeat_task.cancel()
+            for task in worker_tasks:
+                task.cancel()
 
     async def stop(self) -> None:
         logger.info("Shutting down node…")
         self._running = False
-        for task in self._active_jobs.values():
-            task.cancel()
         if self.p2p:
             await self.p2p.stop()
         await self.blockchain.close()
@@ -122,7 +141,23 @@ class Node:
         # Store result on decentralized storage (IPFS via web3.storage or Arweave)
         result_cid = await self._upload_result(job.job_id, result_text)
 
-        await self.blockchain.submit_result(job, result_text.encode(), result_cid)
+        result_bytes = result_text.encode()
+        claimed_hash = hashlib.sha256(result_bytes).digest()
+        is_valid, reason = ResultVerifier.verify_result(
+            result_bytes,
+            claimed_hash,
+            result_cid,
+            job.max_tokens,
+        )
+        if not is_valid:
+            logger.error(
+                "Result verification failed for job %d: %s — skipping on-chain submission",
+                job.job_id,
+                reason,
+            )
+            return
+
+        await self.blockchain.submit_result(job, result_bytes, result_cid)
 
     # ────────────────────────── inference ────────────────────────────────────
 
