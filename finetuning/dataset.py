@@ -10,12 +10,8 @@ Supports:
 import json
 from pathlib import Path
 
-import torch
-from torch.utils.data import Dataset
-from transformers import PreTrainedTokenizer
 
-
-class LocalDataset(Dataset):
+class LocalDataset:
     """
     Loads text data from local files and tokenizes it for causal LM training.
     Data never leaves this node — only gradients are shared with peers.
@@ -24,7 +20,7 @@ class LocalDataset(Dataset):
     def __init__(
         self,
         data_path: str | Path,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer,
         max_length: int = 512,
     ):
         self.tokenizer = tokenizer
@@ -51,7 +47,8 @@ class LocalDataset(Dataset):
     def __len__(self) -> int:
         return len(self.examples)
 
-    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+    def __getitem__(self, idx: int) -> dict:
+
         encoding = self.tokenizer(
             self.examples[idx],
             max_length=self.max_length,

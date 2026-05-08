@@ -17,26 +17,6 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader
-
-try:
-    from peft import LoraConfig, TaskType, get_peft_model
-
-    PEFT_AVAILABLE = True
-except ImportError:
-    PEFT_AVAILABLE = False
-
-try:
-    import hivemind
-
-    HIVEMIND_AVAILABLE = True
-except ImportError:
-    HIVEMIND_AVAILABLE = False
-
-from transformers import AutoModelForCausalLM, AutoTokenizer, get_cosine_schedule_with_warmup
-
 logger = logging.getLogger(__name__)
 
 
@@ -80,19 +60,32 @@ class FederatedTrainer:
     """
 
     def __init__(self, config: FinetuneConfig):
-        if not PEFT_AVAILABLE:
+        try:
+            import peft  # noqa: F401
+        except ImportError:
             raise RuntimeError("pip install peft")
-        if not HIVEMIND_AVAILABLE:
+        try:
+            import hivemind  # noqa: F401
+        except ImportError:
             raise RuntimeError("pip install hivemind")
 
         self.config = config
-        self.model: nn.Module | None = None
-        self.optimizer: hivemind.Optimizer | None = None
-        self.dht: hivemind.DHT | None = None
+        self.model = None
+        self.optimizer = None
+        self.dht = None
         self.tokenizer = None
 
     def setup(self) -> None:
         """Load model, attach LoRA, connect to DHT, wrap with Hivemind optimizer."""
+        import hivemind
+        import torch
+        from peft import LoraConfig, TaskType, get_peft_model
+        from transformers import (
+            AutoModelForCausalLM,
+            AutoTokenizer,
+            get_cosine_schedule_with_warmup,
+        )
+
         logger.info("Loading base model: %s", self.config.model_name)
         base_model = AutoModelForCausalLM.from_pretrained(
             self.config.model_name,
@@ -162,7 +155,7 @@ class FederatedTrainer:
 
         logger.info("Federated trainer ready. DHT peer ID: %s", self.dht.peer_id)
 
-    def train(self, dataloader: DataLoader) -> dict:
+    def train(self, dataloader) -> dict:
         """
         Run the local training loop. Gradients are automatically averaged
         with peers by the Hivemind optimizer at each global step.
@@ -189,6 +182,8 @@ class FederatedTrainer:
             loss.backward()
 
             if (batch_idx + 1) % self.config.gradient_accumulation_steps == 0:
+                import torch
+
                 lora_params = [p for p in self.model.parameters() if p.requires_grad]
                 # Layer 1: norm clipping (fast, eliminates magnitude outliers)
                 torch.nn.utils.clip_grad_norm_(lora_params, self.config.clip_grad_norm)
@@ -223,7 +218,7 @@ class FederatedTrainer:
         logger.info("LoRA adapter saved to %s", output_dir)
 
     def _filter_gradient_by_cosine(
-        self, params: list[nn.Parameter], threshold: float = 0.0
+        self, params: list, threshold: float = 0.0
     ) -> None:
         """
         Zero out gradients whose cosine similarity to the running mean is below
@@ -232,8 +227,10 @@ class FederatedTrainer:
         Only effective when called before optimizer.step() / Hivemind averaging.
         The running mean is maintained locally as a simple EMA.
         """
+        import torch
+
         if not hasattr(self, "_grad_ema"):
-            self._grad_ema: torch.Tensor | None = None
+            self._grad_ema = None
 
         flat = torch.cat([p.grad.view(-1) for p in params if p.grad is not None])
 

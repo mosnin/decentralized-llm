@@ -173,10 +173,62 @@ class DecentralizedLLMClient:
 
     async def vote(self, proposal_id: int, choice: str) -> None:
         """Vote on a governance proposal. choice: 'for' | 'against' | 'abstain'"""
-        choice_map = {"for": {"for": {}}, "against": {"against": {}}, "abstain": {"abstain": {}}}
-        if choice not in choice_map:
-            raise ValueError("choice must be 'for', 'against', or 'abstain'")
-        raise NotImplementedError("Governance voting via Python SDK coming soon")
+        valid = {"for", "against", "abstain"}
+        if choice not in valid:
+            raise ValueError(f"choice must be one of {valid}")
+        if self._client is None:
+            raise RuntimeError("Not connected — use 'async with client'")
+
+        provider = Provider(self._client, self._wallet)
+        gov_program = await Program.at(Pubkey.from_string(GOVERNANCE_PROGRAM), provider)
+
+        # Derive proposal PDA
+        proposal_pda = Pubkey.find_program_address(
+            [b"proposal", proposal_id.to_bytes(8, "little")],
+            Pubkey.from_string(GOVERNANCE_PROGRAM),
+        )[0]
+
+        # Derive vote record PDA (one per voter per proposal)
+        vote_record_pda = Pubkey.find_program_address(
+            [
+                b"vote",
+                bytes(proposal_pda),
+                bytes(self._wallet.public_key),
+            ],
+            Pubkey.from_string(GOVERNANCE_PROGRAM),
+        )[0]
+
+        # Find voter's token account
+        voter_token_account = await self._find_token_account(self._wallet.public_key)
+
+        vote_choice = {
+            "for": {"for": {}},
+            "against": {"against": {}},
+            "abstain": {"abstain": {}},
+        }[choice]
+
+        await gov_program.rpc["cast_vote"](
+            vote_choice,
+            ctx=gov_program.context(
+                accounts={
+                    "proposal": proposal_pda,
+                    "vote_record": vote_record_pda,
+                    "voter_token_account": voter_token_account,
+                    "voter": self._wallet.public_key,
+                    "system_program": Pubkey.from_string(
+                        "11111111111111111111111111111111"
+                    ),
+                }
+            ),
+        )
+
+    async def _find_token_account(self, owner: "Pubkey") -> "Pubkey":
+        """Find the associated token account for the $DLLM token."""
+        from spl.token.instructions import get_associated_token_address
+
+        # TOKEN_MINT is stored in the market state; resolve lazily
+        market = await self._program.account["Market"].fetch(self._market_pda())
+        return get_associated_token_address(owner, market.token_mint)
 
     # ────────────────────────── private ──────────────────────────────────────
 
