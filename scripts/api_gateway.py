@@ -136,6 +136,26 @@ _metrics: dict = {
 # ────────────────────────── schemas ──────────────────────────────────────────
 
 
+class HealthResponse(BaseModel):
+    status: str
+    version: str
+    uptime_seconds: float
+
+
+class ReadinessResponse(BaseModel):
+    status: str
+    checks: dict[str, str]
+    queue_depth: int
+    active_jobs: int
+
+
+class JobStatusResponse(BaseModel):
+    job_id: int
+    status: str
+    result_cid: str | None
+    node: str | None
+
+
 class CompletionRequest(BaseModel):
     model: str = "llama-3.2-3b"
     prompt: str
@@ -172,7 +192,7 @@ class PaymentLinkRequest(BaseModel):
 # ────────────────────────── endpoints ────────────────────────────────────────
 
 
-@app.get("/v1/models")
+@app.get("/v1/models", tags=["inference"])
 async def list_models():
     return {
         "object": "list",
@@ -205,7 +225,7 @@ async def list_models():
     }
 
 
-@app.post("/v1/completions")
+@app.post("/v1/completions", tags=["inference"])
 async def create_completion(req: CompletionRequest, request: Request):
     request_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex[:12]
     set_correlation_id(request_id)
@@ -249,7 +269,7 @@ async def create_completion(req: CompletionRequest, request: Request):
         raise HTTPException(status_code=500, detail={"error": str(exc), "request_id": request_id})
 
 
-@app.post("/v1/chat/completions")
+@app.post("/v1/chat/completions", tags=["inference"])
 async def create_chat_completion(req: ChatCompletionRequest, request: Request):
     """
     OpenAI-compatible chat completions endpoint with optional SSE streaming.
@@ -309,19 +329,19 @@ async def create_chat_completion(req: ChatCompletionRequest, request: Request):
         raise HTTPException(status_code=500, detail={"error": str(exc), "request_id": request_id})
 
 
-@app.get("/v1/governance/proposals")
+@app.get("/v1/governance/proposals", tags=["governance"])
 async def get_proposals():
     proposals = await _client.get_governance_proposals()
     return {"proposals": proposals}
 
 
-@app.post("/v1/governance/vote")
+@app.post("/v1/governance/vote", tags=["governance"])
 async def cast_vote(req: VoteRequest):
     await _client.vote(req.proposal_id, req.choice)
     return {"status": "vote cast"}
 
 
-@app.post("/v1/payments/create")
+@app.post("/v1/payments/create", tags=["payments"])
 async def create_payment_link(req: PaymentLinkRequest):
     link = _paysh.create_payment_link(
         amount_usd_cents=req.amount_usd_cents,
@@ -331,7 +351,7 @@ async def create_payment_link(req: PaymentLinkRequest):
     return link
 
 
-@app.post("/webhooks/paysh")
+@app.post("/webhooks/paysh", tags=["payments"])
 async def paysh_webhook(request: Request):
     body = await request.body()
     sig = request.headers.get("X-Paysh-Signature", "")
@@ -344,17 +364,13 @@ async def paysh_webhook(request: Request):
         raise HTTPException(status_code=401, detail=str(exc))
 
 
-@app.get("/health")
+@app.get("/health", tags=["ops"], response_model=HealthResponse)
 async def health():
     uptime = round(time.time() - _start_time, 1)
-    return {
-        "status": "ok",
-        "version": "0.1.0",
-        "uptime_seconds": uptime,
-    }
+    return HealthResponse(status="ok", version="0.1.0", uptime_seconds=uptime)
 
 
-@app.get("/ready")
+@app.get("/ready", tags=["ops"], response_model=ReadinessResponse)
 async def ready():
     from fastapi.responses import JSONResponse
 
@@ -371,7 +387,7 @@ async def ready():
     return JSONResponse(content=result, status_code=status_code)
 
 
-@app.get("/metrics")
+@app.get("/metrics", tags=["ops"])
 async def prometheus_metrics():
     """Prometheus text format metrics."""
     try:
@@ -388,7 +404,7 @@ async def prometheus_metrics():
         return PlainTextResponse("metrics not available", status_code=503)
 
 
-@app.get("/v1/jobs/{job_id}")
+@app.get("/v1/jobs/{job_id}", tags=["inference"], response_model=JobStatusResponse)
 async def get_job_status(job_id: int):
     """Poll on-chain job status. Useful for clients that prefer polling over waiting."""
     if _client is None:
@@ -396,12 +412,12 @@ async def get_job_status(job_id: int):
     try:
         job_pda = _client._job_pda(job_id)
         job = await _client._program.account["Job"].fetch(job_pda)
-        return {
-            "job_id": job_id,
-            "status": str(job.status),
-            "node": str(job.node),
-            "result_cid": job.result_cid,
-        }
+        return JobStatusResponse(
+            job_id=job_id,
+            status=str(job.status),
+            node=str(job.node),
+            result_cid=job.result_cid,
+        )
     except Exception as exc:
         raise HTTPException(status_code=404, detail=f"Job not found: {exc}")
 
