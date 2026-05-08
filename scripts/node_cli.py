@@ -669,15 +669,34 @@ def build_parser() -> argparse.ArgumentParser:
     # ── status ─────────────────────────────────────────────────────────────
     sp_status = subparsers.add_parser(
         "status",
-        help="Show node status (registration, jobs, earnings)",
+        help="Show node operational status (uptime, jobs, RPC health)",
         description=(
-            "Connect to the Solana RPC, fetch the node's on-chain record, "
-            "and print endpoint, stake, reputation, jobs_completed, "
-            "jobs_disputed, and earnings_claimable."
+            "Fetch live operational metrics from the gateway API "
+            "(http://localhost:8080/v1/dashboard) and display node status. "
+            "Shows N/A values when the gateway is unavailable."
         ),
     )
     _add_config_path(sp_status)
-    sp_status.set_defaults(func=cmd_status)
+    sp_status.set_defaults(func=cmd_node_status)
+
+    # ── earnings ───────────────────────────────────────────────────────────
+    sp_earnings = subparsers.add_parser(
+        "earnings",
+        help="Show earnings summary",
+        description=(
+            "Fetch live earnings data from the gateway API and display a "
+            "summary for the specified time window and lifetime totals."
+        ),
+    )
+    _add_config_path(sp_earnings)
+    sp_earnings.add_argument(
+        "--hours",
+        type=int,
+        default=24,
+        metavar="HOURS",
+        help="Time window in hours (default: 24)",
+    )
+    sp_earnings.set_defaults(func=cmd_node_earnings)
 
     # ── withdraw ───────────────────────────────────────────────────────────
     sp_withdraw = subparsers.add_parser(
