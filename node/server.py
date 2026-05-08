@@ -21,10 +21,12 @@ import time
 from .blockchain import BlockchainClient, OpenJob
 from .config import NodeConfig
 from .encryption import decrypt_prompt
+from .logging_config import set_correlation_id
 from .metrics import METRICS_AVAILABLE
 from .p2p import P2PLayer
 from .shard_manager import ShardManager
 from .storage import StorageClient
+from .timeout_manager import JobTimeoutError, TimeoutManager
 from .verifier import ResultVerifier
 
 logging.basicConfig(
@@ -168,7 +170,17 @@ class Node:
         logger.debug("Job worker %d stopping", worker_id)
 
     async def _handle_job(self, job: OpenJob) -> None:
+        set_correlation_id(f"job-{job.job_id}")
         logger.info("Handling job %d (payment: %d tokens)", job.job_id, job.payment_amount)
+
+        # Dead-on-arrival check: skip jobs whose deadline has already passed.
+        if TimeoutManager.is_expired(job.deadline):
+            logger.warning(
+                "Skipping job %d — deadline already expired (deadline=%d)",
+                job.job_id,
+                job.deadline,
+            )
+            return
 
         claimed = await self.blockchain.claim_job(job)
         if not claimed:
@@ -218,8 +230,25 @@ class Node:
                 active_jobs.dec()
             return
 
-        # Store result on decentralized storage (IPFS via web3.storage or Arweave)
-        result_cid = await self._upload_result(job.job_id, result_text)
+        # Store result on decentralized storage (IPFS via web3.storage or Arweave).
+        # Both operations are wrapped in the job's on-chain deadline.
+        async def _infer_and_upload() -> str:
+            return await self._upload_result(job.job_id, result_text)  # type: ignore[arg-type]
+
+        try:
+            result_cid = await TimeoutManager().run_with_deadline(_infer_and_upload(), job.deadline)
+        except JobTimeoutError:
+            logger.warning(
+                "Job %d timed out during upload (deadline=%d) — abandoning",
+                job.job_id,
+                job.deadline,
+            )
+            if METRICS_AVAILABLE:
+                from .metrics import active_jobs, jobs_failed_total
+
+                jobs_failed_total.inc()
+                active_jobs.dec()
+            return
 
         result_bytes = result_text.encode()
         claimed_hash = hashlib.sha256(result_bytes).digest()
