@@ -26,6 +26,11 @@ class NodeConfig:
 
     # Model serving
     model_name: str = os.getenv("MODEL_NAME", "meta-llama/Llama-3.2-3B")
+    # List of models this node is willing to serve.  Defaults to [model_name]
+    # when not explicitly set so single-model deployments keep working as-is.
+    supported_models: list[str] = field(
+        default_factory=lambda: [m for m in os.getenv("SUPPORTED_MODELS", "").split(",") if m]
+    )
     num_shards: int = int(os.getenv("NUM_SHARDS", "4"))
     shard_index: int = int(os.getenv("SHARD_INDEX", "0"))
     cache_dir: str = os.getenv("MODEL_CACHE_DIR", str(Path.home() / ".cache/decentralized-llm"))

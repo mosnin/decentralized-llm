@@ -24,6 +24,7 @@ from .encryption import decrypt_prompt
 from .integrity import IntegrityError, compute_model_id, verify_model_id, verify_prompt_hash
 from .logging_config import set_correlation_id
 from .metrics import METRICS_AVAILABLE
+from .model_registry import ModelRegistry
 from .p2p import P2PLayer
 from .shard_manager import ShardManager
 from .storage import StorageClient
@@ -45,6 +46,7 @@ class Node:
     def __init__(self, config: NodeConfig | None = None):
         self.config = config or NodeConfig()
         self.shard_mgr = ShardManager(self.config)
+        self._model_registry = ModelRegistry()
         self.blockchain = BlockchainClient(self.config)
         self.storage: StorageClient | None = None
         self.p2p: P2PLayer | None = None
@@ -68,6 +70,12 @@ class Node:
         )
 
         self.shard_mgr.load()
+
+        # Load all supported models into the registry concurrently.
+        # Falls back to [model_name] when supported_models is empty so that
+        # single-model deployments continue to work without extra config.
+        models_to_load = self.config.supported_models or [self.config.model_name]
+        await self._model_registry.load_all(models_to_load, self.config)
 
         if self.config.lighthouse_api_key:
             self.storage = StorageClient(api_key=self.config.lighthouse_api_key)
@@ -174,6 +182,10 @@ class Node:
         set_correlation_id(f"job-{job.job_id}")
         logger.info("Handling job %d (payment: %d tokens)", job.job_id, job.payment_amount)
 
+        # Resolve the ShardManager for this job's model via the registry.
+        # Fall back to the legacy self.shard_mgr when the registry has no entry.
+        shard_mgr = self._model_registry.get_by_model_id(job.model_id) or self.shard_mgr
+
         # Dead-on-arrival check: skip jobs whose deadline has already passed.
         if TimeoutManager.is_expired(job.deadline):
             logger.warning(
@@ -200,8 +212,20 @@ class Node:
         last_exc: Exception | None = None
         for attempt in range(1 + _MAX_RETRIES):
             try:
-                result_text = await self._run_inference(job)
+                result_text = await self._run_inference(job, shard_mgr)
                 break
+            except IntegrityError as exc:
+                logger.error(
+                    "Prompt integrity check failed for job %d: %s — skipping tampered job",
+                    job.job_id,
+                    exc,
+                )
+                if METRICS_AVAILABLE:
+                    from .metrics import active_jobs, jobs_failed_total
+
+                    jobs_failed_total.inc()
+                    active_jobs.dec()
+                return
             except Exception as exc:
                 last_exc = exc
                 if attempt < _MAX_RETRIES:
@@ -283,7 +307,7 @@ class Node:
 
     # ────────────────────────── inference ────────────────────────────────────
 
-    async def _run_inference(self, job: OpenJob) -> str:
+    async def _run_inference(self, job: OpenJob, shard_mgr: ShardManager | None = None) -> str:
         """
         Execute a pipeline-parallel inference pass.
 
@@ -293,21 +317,25 @@ class Node:
 
         The actual prompt is retrieved off-chain (delivered encrypted to the
         claiming node via the client's P2P channel or a content-addressed store).
+
+        *shard_mgr* selects the model to use; falls back to ``self.shard_mgr``
+        when not provided so existing callers keep working.
         """
         # In a full implementation, the client sends the encrypted prompt
         # directly to the claiming node via a secure P2P channel keyed to
         # the node's wallet public key. Here we show the structural skeleton.
 
+        mgr = shard_mgr if shard_mgr is not None else self.shard_mgr
         loop = asyncio.get_event_loop()
 
         if self.config.shard_index == 0:
             prompt = await self._fetch_prompt(job)
-            input_ids = await loop.run_in_executor(None, self._tokenize, prompt)
-            hidden = await loop.run_in_executor(None, self.shard_mgr.embed, input_ids)
+            input_ids = await loop.run_in_executor(None, self._tokenize_with, mgr, prompt)
+            hidden = await loop.run_in_executor(None, mgr.embed, input_ids)
         else:
             hidden = await self._receive_activations(job.job_id)
 
-        hidden = await loop.run_in_executor(None, self.shard_mgr.forward, hidden)
+        hidden = await loop.run_in_executor(None, mgr.forward, hidden)
 
         if self.config.shard_index < self.config.num_shards - 1:
             # Push activations into the DHT for the next shard to pick up
@@ -316,36 +344,40 @@ class Node:
             return await self._await_result(job.job_id)
         else:
             # Last shard: generate tokens autoregressively and publish result
-            result = await loop.run_in_executor(None, self._generate, hidden, job.max_tokens)
+            result = await loop.run_in_executor(
+                None, self._generate_with, mgr, hidden, job.max_tokens
+            )
             await self._publish_result(job.job_id, result)
             return result
 
     def _tokenize(self, prompt: str):
-        tokens = self.shard_mgr.tokenizer(
-            prompt, return_tensors="pt", truncation=True, max_length=2048
-        )
-        device = next(self.shard_mgr.model.parameters()).device
+        return self._tokenize_with(self.shard_mgr, prompt)
+
+    def _tokenize_with(self, mgr: ShardManager, prompt: str):
+        tokens = mgr.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
+        device = next(mgr.model.parameters()).device
         return tokens["input_ids"].to(device)
 
     def _generate(self, hidden, max_new_tokens: int) -> str:
-        logits = self.shard_mgr.decode(hidden)
+        return self._generate_with(self.shard_mgr, hidden, max_new_tokens)
+
+    def _generate_with(self, mgr: ShardManager, hidden, max_new_tokens: int) -> str:
+        logits = mgr.decode(hidden)
         # Greedy decoding for simplicity; swap for sampling/beam search as needed
         generated = logits[:, -1, :].argmax(dim=-1, keepdim=True)
         tokens = [generated.item()]
 
         for _ in range(max_new_tokens - 1):
-            hidden = self.shard_mgr.forward(
-                self.shard_mgr.model.layers[-1](hidden)[0]
-                if hasattr(self.shard_mgr.model, "layers")
-                else hidden
+            hidden = mgr.forward(
+                mgr.model.layers[-1](hidden)[0] if hasattr(mgr.model, "layers") else hidden
             )
-            logits = self.shard_mgr.decode(hidden)
+            logits = mgr.decode(hidden)
             next_tok = logits[:, -1, :].argmax(dim=-1, keepdim=True)
             tokens.append(next_tok.item())
-            if next_tok.item() == self.shard_mgr.tokenizer.eos_token_id:
+            if next_tok.item() == mgr.tokenizer.eos_token_id:
                 break
 
-        return self.shard_mgr.tokenizer.decode(tokens, skip_special_tokens=True)
+        return mgr.tokenizer.decode(tokens, skip_special_tokens=True)
 
     # ────────────────────────── helpers ──────────────────────────────────────
 
@@ -511,6 +543,11 @@ class Node:
         import torch
 
         model_id = self._model_id_bytes()
+        # Sanity-check: verify our own model_id round-trips correctly.
+        if not verify_model_id(self.config.model_name, model_id):
+            raise RuntimeError(
+                f"Model ID mismatch for '{self.config.model_name}' — integrity check failed"
+            )
         gpu_count = torch.cuda.device_count() or 1
         vram_gb = 0
         if torch.cuda.is_available():
@@ -528,7 +565,7 @@ class Node:
         )
 
     def _model_id_bytes(self) -> bytes:
-        return hashlib.sha256(self.config.model_name.encode()).digest()
+        return compute_model_id(self.config.model_name)
 
 
 # ────────────────────────── entrypoint ───────────────────────────────────────

@@ -130,6 +130,12 @@ def _make_node(max_concurrent_jobs: int = 2):
     node.p2p = None
     node._running = False
     node._active_jobs = {}
+
+    # ModelRegistry added in Phase 14b; mock it so tests keep working
+    mock_registry = MagicMock()
+    mock_registry.get_by_model_id = MagicMock(return_value=None)
+    mock_registry.load_all = AsyncMock()
+    node._model_registry = mock_registry
     node._job_queue = asyncio.PriorityQueue()
 
     return node
@@ -192,7 +198,7 @@ class TestRetryOnInferenceFailure:
 
         call_count = 0
 
-        async def flaky_inference(self_node, j):
+        async def flaky_inference(self_node, j, shard_mgr=None):
             nonlocal call_count
             call_count += 1
             if call_count < 3:
