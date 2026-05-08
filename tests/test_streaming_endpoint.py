@@ -33,6 +33,20 @@ def _make_app():
     return app
 
 
+def _make_finished_registry(job_id: int, tokens: list[str]):
+    """Return a registry with a pre-populated, finished stream (no event loop needed)."""
+    from node.token_streamer import TokenStreamRegistry
+
+    registry = TokenStreamRegistry()
+    stream = registry.create(job_id=job_id)
+    # Bypass async API — write directly into the underlying queue so no running
+    # event loop is required when setting up the test fixture.
+    for token in tokens:
+        stream._queue.put_nowait(token)
+    stream._queue.put_nowait(None)  # sentinel — matches what finish() sends
+    return registry
+
+
 class TestStreamEndpoint:
     def test_stream_endpoint_404_when_no_stream(self):
         """GET /v1/stream/999 with no stream registered returns 404."""
@@ -44,17 +58,7 @@ class TestStreamEndpoint:
 
     def test_stream_endpoint_yields_sse_events(self):
         """A stream with 2 tokens produces correct SSE data lines."""
-        import asyncio
-
-        from node.token_streamer import TokenStreamRegistry
-
-        registry = TokenStreamRegistry()
-        stream = registry.create(job_id=1)
-
-        # Pre-populate the stream so TestClient can drain it synchronously
-        asyncio.run(stream.push("token1"))
-        asyncio.run(stream.push("token2"))
-        asyncio.run(stream.finish())
+        registry = _make_finished_registry(job_id=1, tokens=["token1", "token2"])
 
         app = _make_app()
         with patch("scripts.api_gateway._token_stream_registry", registry):
@@ -70,13 +74,7 @@ class TestStreamEndpoint:
 
     def test_stream_endpoint_cache_control_headers(self):
         """The SSE response must carry no-cache and buffering-disable headers."""
-        import asyncio
-
-        from node.token_streamer import TokenStreamRegistry
-
-        registry = TokenStreamRegistry()
-        stream = registry.create(job_id=2)
-        asyncio.run(stream.finish())
+        registry = _make_finished_registry(job_id=2, tokens=[])
 
         app = _make_app()
         with patch("scripts.api_gateway._token_stream_registry", registry):
@@ -89,13 +87,7 @@ class TestStreamEndpoint:
 
     def test_stream_endpoint_done_sentinel_present_with_no_tokens(self):
         """A stream that finishes immediately still sends [DONE]."""
-        import asyncio
-
-        from node.token_streamer import TokenStreamRegistry
-
-        registry = TokenStreamRegistry()
-        stream = registry.create(job_id=3)
-        asyncio.run(stream.finish())
+        registry = _make_finished_registry(job_id=3, tokens=[])
 
         app = _make_app()
         with patch("scripts.api_gateway._token_stream_registry", registry):
