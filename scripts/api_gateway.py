@@ -198,36 +198,78 @@ class PaymentLinkRequest(BaseModel):
 # ────────────────────────── endpoints ────────────────────────────────────────
 
 
+_MODELS = [
+    {
+        "id": "meta-llama/Llama-3.2-3B",
+        "context_length": 131072,
+        "precision": ["fp16", "int8"],
+        "min_payment_lamports": 500,
+    },
+    {
+        "id": "mistralai/Mistral-7B-v0.1",
+        "context_length": 32768,
+        "precision": ["fp16", "int4"],
+        "min_payment_lamports": 1000,
+    },
+]
+
+# OpenAI-compat aliases kept for legacy clients
+_MODELS_OPENAI_COMPAT = [
+    {
+        "id": "llama-3.2-1b",
+        "object": "model",
+        "owned_by": "decentralized-llm-network",
+        "description": "LLaMA 3.2 1B — fastest, lowest cost",
+    },
+    {
+        "id": "llama-3.2-3b",
+        "object": "model",
+        "owned_by": "decentralized-llm-network",
+        "description": "LLaMA 3.2 3B — balanced",
+    },
+    {
+        "id": "llama-3.1-8b",
+        "object": "model",
+        "owned_by": "decentralized-llm-network",
+        "description": "LLaMA 3.1 8B — highest quality",
+    },
+    {
+        "id": "mistral-7b",
+        "object": "model",
+        "owned_by": "decentralized-llm-network",
+        "description": "Mistral 7B v0.3",
+    },
+]
+
+
+@app.get("/v1/info", tags=["ops"])
+async def api_info():
+    """Return static network and API discovery information."""
+    return {
+        "api_version": "1.0.0",
+        "network": "devnet",
+        "supported_models": [m["id"] for m in _MODELS],
+        "max_tokens_limit": 4096,
+        "min_payment_lamports": 1000,
+        "features": ["streaming", "webhooks", "reputation", "governance"],
+        "endpoints": {
+            "inference": "/v1/jobs",
+            "stream": "/v1/stream/{job_id}",
+            "health": "/health",
+            "ready": "/ready",
+            "metrics": "/metrics",
+            "stats": "/v1/network/stats",
+            "dashboard": "/v1/dashboard",
+        },
+    }
+
+
 @app.get("/v1/models", tags=["inference"])
 async def list_models():
     return {
         "object": "list",
-        "data": [
-            {
-                "id": "llama-3.2-1b",
-                "object": "model",
-                "owned_by": "decentralized-llm-network",
-                "description": "LLaMA 3.2 1B — fastest, lowest cost",
-            },
-            {
-                "id": "llama-3.2-3b",
-                "object": "model",
-                "owned_by": "decentralized-llm-network",
-                "description": "LLaMA 3.2 3B — balanced",
-            },
-            {
-                "id": "llama-3.1-8b",
-                "object": "model",
-                "owned_by": "decentralized-llm-network",
-                "description": "LLaMA 3.1 8B — highest quality",
-            },
-            {
-                "id": "mistral-7b",
-                "object": "model",
-                "owned_by": "decentralized-llm-network",
-                "description": "Mistral 7B v0.3",
-            },
-        ],
+        "data": _MODELS_OPENAI_COMPAT,
+        "models": _MODELS,
     }
 
 

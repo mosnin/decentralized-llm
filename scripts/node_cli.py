@@ -6,6 +6,7 @@ Usage:
     python -m scripts.node_cli register           # Register node on-chain
     python -m scripts.node_cli start              # Start the node server
     python -m scripts.node_cli status             # Show node status (registration, jobs, earnings)
+    python -m scripts.node_cli earnings           # Show earnings summary
     python -m scripts.node_cli withdraw           # Withdraw earnings to wallet
     python -m scripts.node_cli config show        # Show current config as YAML
     python -m scripts.node_cli governance list    # List active governance proposals
