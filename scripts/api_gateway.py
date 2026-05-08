@@ -31,6 +31,7 @@ from client.python import DecentralizedLLMClient
 from integrations.paysh import PayshHandler
 from node.logging_config import configure_logging, set_correlation_id
 from node.network_stats import NetworkStatsCollector
+from node.token_streamer import TokenStreamRegistry
 
 configure_logging()
 
@@ -40,6 +41,7 @@ _client: DecentralizedLLMClient | None = None
 _paysh: PayshHandler | None = None
 _start_time: float = time.time()
 _stats_collector = NetworkStatsCollector()
+_token_stream_registry = TokenStreamRegistry()
 
 
 @asynccontextmanager
@@ -422,6 +424,29 @@ async def get_job_status(job_id: int):
         )
     except Exception as exc:
         raise HTTPException(status_code=404, detail=f"Job not found: {exc}")
+
+
+@app.get("/v1/stream/{job_id}", tags=["inference"])
+async def stream_inference(job_id: int) -> StreamingResponse:
+    """Stream inference tokens for a job via Server-Sent Events."""
+    stream = _token_stream_registry.get(job_id)
+    if stream is None:
+        raise HTTPException(status_code=404, detail="Stream not found or job not active")
+
+    async def event_generator():
+        async for token in stream:
+            # SSE format: "data: <token>\n\n"
+            yield f"data: {token}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/v1/network/stats", tags=["ops"])
