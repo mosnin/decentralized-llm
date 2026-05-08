@@ -176,6 +176,58 @@ class BlockchainClient:
             logger.warning("Node registration failed (may already be registered): %s", exc)
             return False
 
+    async def heartbeat(self, endpoint: str) -> bool:
+        """
+        Update the node's endpoint in the compute-registry to signal liveness.
+
+        Called every ~60 seconds by the node server. Allows detection of IP
+        changes on GPU rental platforms (Vast.ai reassigns IPs on restart).
+        """
+        if not self._registry_program:
+            return False
+        try:
+            await self._registry_program.rpc["update_endpoint"](
+                endpoint,
+                ctx=self._registry_program.context(accounts={"operator": self._wallet.public_key}),
+            )
+            logger.debug("Heartbeat: updated endpoint to %s", endpoint)
+            return True
+        except Exception as exc:
+            logger.warning("Heartbeat failed: %s", exc)
+            return False
+
+    async def auto_settle_expired_jobs(self) -> int:
+        """
+        Permissionlessly settle any inference jobs whose challenge windows
+        have closed. Anyone can call auto_settle — no special authority needed.
+
+        Returns the number of jobs settled.
+        """
+        if not self._inference_program:
+            return 0
+
+        settled = 0
+        try:
+            import time
+
+            now = int(time.time())
+            jobs = await self._inference_program.account["Job"].all()
+            for j in jobs:
+                status = str(j.account.status)
+                if "PendingAcceptance" in status and j.account.claimed_at + 300 < now:
+                    try:
+                        await self._inference_program.rpc["auto_settle"](
+                            ctx=self._inference_program.context(accounts={"job": j.public_key})
+                        )
+                        settled += 1
+                        logger.info("Auto-settled job %d", j.account.id)
+                    except Exception:
+                        pass
+        except Exception as exc:
+            logger.warning("auto_settle scan failed: %s", exc)
+
+        return settled
+
     async def close(self) -> None:
         if self._client:
             await self._client.close()

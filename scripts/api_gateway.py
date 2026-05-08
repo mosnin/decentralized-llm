@@ -35,19 +35,32 @@ _paysh: PayshHandler | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _client, _paysh
-    _client = DecentralizedLLMClient(
-        wallet_path=os.environ.get("WALLET_PATH", "~/.config/solana/id.json"),
-        rpc_url=os.environ.get("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com"),
-    )
-    await _client.__aenter__()
+    _lifespan_owns_client = False
+    if _client is None:
+        try:
+            _client = DecentralizedLLMClient(
+                wallet_path=os.environ.get("WALLET_PATH", "~/.config/solana/id.json"),
+                rpc_url=os.environ.get("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com"),
+            )
+            await _client.__aenter__()
+            _lifespan_owns_client = True
+        except Exception as exc:
+            import logging
 
-    _paysh = PayshHandler(
-        api_key=os.environ.get("PAYSH_API_KEY", ""),
-        webhook_secret=os.environ.get("PAYSH_WEBHOOK_SECRET", ""),
-        on_payment=_handle_payment,
-    )
+            logging.getLogger(__name__).warning(
+                "Blockchain client unavailable (Solana deps missing?): %s", exc
+            )
+            _client = None
+
+    if _paysh is None:
+        _paysh = PayshHandler(
+            api_key=os.environ.get("PAYSH_API_KEY", ""),
+            webhook_secret=os.environ.get("PAYSH_WEBHOOK_SECRET", ""),
+            on_payment=_handle_payment,
+        )
     yield
-    await _client.__aexit__(None, None, None)
+    if _lifespan_owns_client and _client is not None:
+        await _client.__aexit__(None, None, None)
 
 
 app = FastAPI(

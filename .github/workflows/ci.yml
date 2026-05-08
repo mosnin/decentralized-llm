@@ -24,10 +24,27 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
 
+      - name: Cache Solana CLI
+        uses: actions/cache@v4
+        id: cache-solana
+        with:
+          path: |
+            ~/.local/share/solana
+            ~/.cache/solana
+          key: solana-v1.18.0-${{ runner.os }}
+
       - name: Install Solana CLI
+        if: steps.cache-solana.outputs.cache-hit != 'true'
         run: |
           sh -c "$(curl -sSfL https://release.solana.com/v1.18.0/install)"
+
+      - name: Add Solana to PATH
+        run: |
           echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+          # Install the SBF/BPF compiler toolchain needed for anchor build
+          $HOME/.local/share/solana/install/active_release/bin/solana-install update || true
+          $HOME/.local/share/solana/install/active_release/bin/cargo-build-sbf --version || \
+            cargo install cargo-build-sbf --locked 2>/dev/null || true
 
       - name: Install Anchor CLI
         run: |

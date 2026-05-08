@@ -31,11 +31,11 @@ TOKENS_PER_USD_CENT = 100
 class PaymentEvent:
     payment_id: str
     amount_usd_cents: int
-    currency: str  # "usd", "eur", "sol", "usdc", etc.
     customer_wallet: str  # Solana wallet address to receive tokens
     tokens_to_mint: int
-    timestamp: int
     status: str  # "completed", "refunded", "failed"
+    currency: str = "usd"  # "usd", "eur", "sol", "usdc", etc.
+    timestamp: int = 0
 
 
 class PayshHandler:

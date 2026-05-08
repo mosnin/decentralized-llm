@@ -83,3 +83,91 @@ class StorageClient:
             path.write_bytes(content)
             response = self._lh.upload(source=str(path))
             return response["data"]["Hash"]
+
+
+class ArweaveStorageClient:
+    """
+    Async wrapper around the arweave-python-client SDK for permanent
+    model weight storage on the Arweave permaweb.
+
+    Install the SDK with: pip install arweave-python-client
+    """
+
+    def __init__(self, wallet_path: str) -> None:
+        wallet_file = Path(wallet_path)
+        if not wallet_file.exists():
+            raise FileNotFoundError(f"Arweave wallet file not found: {wallet_path}")
+
+        try:
+            import arweave  # noqa: F401
+        except ImportError:
+            raise RuntimeError("pip install arweave-python-client")
+
+        import arweave as _arweave
+
+        self._wallet = _arweave.Wallet(wallet_path)
+
+    async def upload_model_weights(self, model_dir: str | Path, model_id: str) -> str:
+        """
+        Archive *model_dir* as a tar file and upload to Arweave.
+
+        Returns the Arweave transaction ID.
+        """
+        return await asyncio.get_event_loop().run_in_executor(
+            None, self._upload_weights_sync, Path(model_dir), model_id
+        )
+
+    async def get_model_url(self, tx_id: str) -> str:
+        """Return the Arweave gateway URL for a given transaction ID."""
+        return f"https://arweave.net/{tx_id}"
+
+    async def download_model_weights(self, tx_id: str, dest_dir: str | Path) -> None:
+        """
+        Download a model archive from the Arweave gateway and extract it
+        to *dest_dir*.
+        """
+        import aiohttp
+
+        dest = Path(dest_dir)
+        dest.mkdir(parents=True, exist_ok=True)
+
+        url = await self.get_model_url(tx_id)
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=300)) as resp:
+                if resp.status != 200:
+                    raise RuntimeError(
+                        f"Failed to download tx {tx_id} from Arweave gateway (HTTP {resp.status})"
+                    )
+                data = await resp.read()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive_path = Path(tmpdir) / "model.tar"
+            archive_path.write_bytes(data)
+            import tarfile
+
+            with tarfile.open(archive_path, "r:*") as tar:
+                tar.extractall(path=dest)
+
+    # ─────────────────────────── sync internals ───────────────────────────────
+
+    def _upload_weights_sync(self, model_dir: Path, model_id: str) -> str:
+        """Run in a thread pool — Arweave SDK is synchronous."""
+        import tarfile
+
+        import arweave
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive_path = Path(tmpdir) / "model.tar"
+            with tarfile.open(archive_path, "w:gz") as tar:
+                tar.add(model_dir, arcname=model_dir.name)
+
+            transaction = arweave.Transaction(
+                self._wallet,
+                data=archive_path.read_bytes(),
+            )
+            transaction.add_tag("App-Name", "decentralized-llm")
+            transaction.add_tag("Model-ID", model_id)
+            transaction.add_tag("Content-Type", "application/x-tar")
+            transaction.sign()
+            transaction.send()
+            return transaction.id

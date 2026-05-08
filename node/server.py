@@ -65,7 +65,11 @@ class Node:
 
         self._running = True
         logger.info("Node ready. Starting job poll loop.")
-        await self._job_loop()
+        heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        try:
+            await self._job_loop()
+        finally:
+            heartbeat_task.cancel()
 
     async def stop(self) -> None:
         logger.info("Shutting down node…")
@@ -77,6 +81,15 @@ class Node:
         await self.blockchain.close()
 
     # ────────────────────────── job loop ─────────────────────────────────────
+
+    async def _heartbeat_loop(self) -> None:
+        """Update on-chain endpoint every 60 s and permissionlessly settle expired jobs."""
+        public_host = self.config.public_host or self.config.listen_host
+        endpoint = f"{public_host}:{self.config.listen_port}"
+        while self._running:
+            await self.blockchain.heartbeat(endpoint)
+            await self.blockchain.auto_settle_expired_jobs()
+            await asyncio.sleep(60)
 
     async def _job_loop(self) -> None:
         model_id = self._model_id_bytes()
