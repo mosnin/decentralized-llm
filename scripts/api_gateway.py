@@ -334,34 +334,18 @@ async def health():
 @app.get("/metrics")
 async def prometheus_metrics():
     """Prometheus text format metrics."""
-    uptime = time.time() - _metrics["started_at"]
-    lines = [
-        "# HELP dllm_requests_total Total inference requests",
-        "# TYPE dllm_requests_total counter",
-        f"dllm_requests_total {_metrics['requests_total']}",
-        "# HELP dllm_requests_success_total Successful inference requests",
-        "# TYPE dllm_requests_success_total counter",
-        f"dllm_requests_success_total {_metrics['requests_success']}",
-        "# HELP dllm_requests_failed_total Failed inference requests",
-        "# TYPE dllm_requests_failed_total counter",
-        f"dllm_requests_failed_total {_metrics['requests_failed']}",
-        "# HELP dllm_tokens_generated_total Total tokens generated",
-        "# TYPE dllm_tokens_generated_total counter",
-        f"dllm_tokens_generated_total {_metrics['tokens_generated']}",
-        "# HELP dllm_payments_processed_total Total payments processed",
-        "# TYPE dllm_payments_processed_total counter",
-        f"dllm_payments_processed_total {_metrics['payments_processed']}",
-        "# HELP dllm_tokens_minted_total Total $DLLM tokens minted",
-        "# TYPE dllm_tokens_minted_total counter",
-        f"dllm_tokens_minted_total {_metrics['tokens_minted']}",
-        "# HELP dllm_uptime_seconds Gateway uptime in seconds",
-        "# TYPE dllm_uptime_seconds gauge",
-        f"dllm_uptime_seconds {uptime:.1f}",
-    ]
-    return StreamingResponse(
-        iter(["\n".join(lines) + "\n"]),
-        media_type="text/plain; version=0.0.4",
-    )
+    try:
+        from prometheus_client import generate_latest
+
+        output = generate_latest()
+        return StreamingResponse(
+            iter([output]),
+            media_type="text/plain; version=0.0.4",
+        )
+    except ImportError:
+        from fastapi.responses import PlainTextResponse
+
+        return PlainTextResponse("metrics not available", status_code=503)
 
 
 @app.get("/v1/jobs/{job_id}")
