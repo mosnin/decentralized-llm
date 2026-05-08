@@ -135,24 +135,39 @@ class DynamicBatcher:
 
     def _drain(self, model_name: str) -> InferenceBatch:
         """
-        Remove and return all accumulated jobs for *model_name* as a batch.
+        Remove and return up to ``max_batch_size`` accumulated jobs for *model_name*.
 
-        Must be called with ``self._lock`` held.
+        If the buffer holds more items than ``max_batch_size``, the remainder
+        stays in the buffer so a subsequent call to ``next_batch`` can pick them
+        up.  Must be called with ``self._lock`` held.
         """
-        items = self._buffers.pop(model_name, [])
-        self._buffer_created_at.pop(model_name, None)
-        self._events.pop(model_name, None)
+        buf = self._buffers[model_name]
+        items = buf[: self.max_batch_size]
+        remaining = buf[self.max_batch_size :]
+
+        if remaining:
+            # Leave the overflow in the buffer; reset the arrival timestamp so
+            # max_wait_ms is measured from when the new "window" starts.
+            self._buffers[model_name] = remaining
+            self._buffer_created_at[model_name] = time.monotonic()
+            # Ensure the event exists (it may have been popped by _try_drain earlier).
+            if model_name not in self._events:
+                self._events[model_name] = asyncio.Event()
+        else:
+            # Buffer fully consumed — tear down all tracking for this model.
+            self._buffers.pop(model_name, None)
+            self._buffer_created_at.pop(model_name, None)
+            self._events.pop(model_name, None)
 
         job_ids = [item[0] for item in items]
         prompts = [item[1] for item in items]
         max_tokens = [item[2] for item in items]
-        created_at = time.monotonic()
 
         batch = InferenceBatch(
             job_ids=job_ids,
             prompts=prompts,
             max_tokens=max_tokens,
-            created_at=created_at,
+            created_at=time.monotonic(),
         )
 
         size = len(job_ids)
