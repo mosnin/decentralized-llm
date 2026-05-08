@@ -18,8 +18,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import getpass
+import json
 import logging
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import yaml
@@ -349,6 +352,123 @@ def _print_status(
     print(f"  jobs_disputed      : {_fmt(jobs_disputed)}")
     print(f"  earnings_claimable : {_fmt(earnings_claimable)}")
     print("─" * 40)
+
+
+# ─────────────────────────── gateway helpers ───────────────────────────────
+
+
+def _fetch_dashboard(gateway_url: str) -> dict | None:
+    """Fetch dashboard data from the gateway API.  Returns None if unavailable."""
+    url = gateway_url.rstrip("/") + "/v1/dashboard"
+    try:
+        with urllib.request.urlopen(url, timeout=3) as resp:
+            return json.loads(resp.read())
+    except Exception:
+        return None
+
+
+def _fmt_uptime(seconds: float) -> str:
+    secs = int(seconds)
+    h = secs // 3600
+    m = (secs % 3600) // 60
+    s = secs % 60
+    return f"{h}h {m:02d}m {s:02d}s"
+
+
+def _fmt_lamports(lamports: int) -> str:
+    sol = lamports / 1_000_000_000
+    return f"{lamports:,} lamports ({sol:.6f} SOL)"
+
+
+def cmd_node_status(args: argparse.Namespace) -> None:
+    """Print node operational status (live data from gateway or N/A)."""
+    config_path = _config_path_from_args(args)
+    config = _load_config(config_path)
+
+    gateway = config.get("gateway_url", "http://localhost:8080")
+    data = _fetch_dashboard(gateway)
+
+    node_id = config.get("node_id") or config.get("compute_registry_program", "N/A")
+
+    if data:
+        uptime = _fmt_uptime(data.get("uptime_seconds", 0))
+        version = data.get("version", "N/A")
+        blockchain_status = data.get("health", {}).get("blockchain", "N/A")
+        rpc_status = "connected" if blockchain_status == "ok" else "disconnected"
+        jobs_today = data.get("network", {}).get("jobs_24h", "N/A")
+        queue_depth = data.get("inference", {}).get("queue_depth", "N/A")
+        node_status = "running"
+    else:
+        uptime = "N/A"
+        version = "0.1.0"
+        rpc_status = "disconnected"
+        jobs_today = "N/A"
+        queue_depth = "N/A"
+        node_status = "stopped"
+
+    label_w = 12
+    print("Node Status")
+    print("===========")
+    print(f"{'Node ID:':<{label_w}} {node_id}")
+    print(f"{'Status:':<{label_w}} {node_status}")
+    print(f"{'Uptime:':<{label_w}} {uptime}")
+    print(f"{'Version:':<{label_w}} {version}")
+    print(f"{'RPC:':<{label_w}} {rpc_status}")
+    print(f"{'Jobs Today:':<{label_w}} {jobs_today}")
+    print(f"{'Queue Depth:':<{label_w}} {queue_depth}")
+
+
+def cmd_node_earnings(args: argparse.Namespace) -> None:
+    """Print earnings summary (live data from gateway or N/A)."""
+    config_path = _config_path_from_args(args)
+    config = _load_config(config_path)
+    hours = args.hours
+
+    gateway = config.get("gateway_url", "http://localhost:8080")
+    data = _fetch_dashboard(gateway)
+
+    label_w = 17
+
+    if data:
+        inf = data.get("inference", {})
+        net = data.get("network", {})
+        jobs_completed = inf.get("total_requests", "N/A")
+        total_stake = net.get("total_stake_lamports", 0)
+        if isinstance(jobs_completed, int) and isinstance(total_stake, (int, float)):
+            total_earned = int(total_stake)
+            avg_per_job = total_earned // jobs_completed if jobs_completed else 0
+            total_earned_fmt = _fmt_lamports(total_earned)
+            avg_per_job_fmt = f"{avg_per_job:,} lamports"
+        else:
+            total_earned_fmt = "N/A"
+            avg_per_job_fmt = "N/A"
+        top_model = config.get("model_name", "N/A")
+        top_model_jobs = jobs_completed if isinstance(jobs_completed, int) else "N/A"
+        top_model_str = (
+            f"{top_model} ({top_model_jobs} jobs)" if isinstance(top_model_jobs, int) else top_model
+        )
+        lifetime_jobs = jobs_completed
+        lifetime_earned = total_earned_fmt
+    else:
+        jobs_completed = "N/A"
+        total_earned_fmt = "N/A"
+        avg_per_job_fmt = "N/A"
+        top_model_str = "N/A"
+        lifetime_jobs = "N/A"
+        lifetime_earned = "N/A"
+
+    heading = f"Earnings Summary (last {hours}h)"
+    print(heading)
+    print("=" * len(heading))
+    print(f"{'Jobs Completed:':<{label_w}} {jobs_completed}")
+    print(f"{'Total Earned:':<{label_w}} {total_earned_fmt}")
+    print(f"{'Avg per Job:':<{label_w}} {avg_per_job_fmt}")
+    print(f"{'Top Model:':<{label_w}} {top_model_str}")
+    print()
+    print("Lifetime Totals")
+    print("===============")
+    print(f"{'Total Jobs:':<{label_w}} {lifetime_jobs}")
+    print(f"{'Total Earned:':<{label_w}} {lifetime_earned}")
 
 
 def cmd_withdraw(args: argparse.Namespace) -> None:
