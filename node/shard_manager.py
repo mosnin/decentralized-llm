@@ -102,6 +102,32 @@ class ShardManager:
         with torch.no_grad():
             return self.model.decode(hidden_states)
 
+    def generate(self, prompt: str, max_tokens: int) -> str:
+        """
+        Generate text for a single prompt.
+
+        This is the single-prompt entry point used by ``generate_batch`` and
+        by the autoregressive decoding loop in ``node/server.py``.
+        """
+        raise NotImplementedError(
+            "generate() must be implemented by the concrete shard wrapper or subclass."
+        )
+
+    def generate_batch(self, prompts: list[str], max_tokens: list[int]) -> list[str]:
+        """
+        Generate text for a batch of prompts that share the same model.
+
+        Each (prompt, max_tokens) pair is processed sequentially by delegating
+        to ``generate()``.
+
+        # TODO: Replace the sequential loop with true batched forward passes so
+        #       all prompts in the batch share a single GPU kernel launch.  This
+        #       requires padding inputs to the same sequence length and running a
+        #       batched forward pass through the shard layers, which is the
+        #       standard approach used by vLLM and similar systems.
+        """
+        return [self.generate(prompt, n) for prompt, n in zip(prompts, max_tokens)]
+
     # ──────────────────── private helpers ────────────────────────────────────
 
     def _compute_slice(self, total_layers: int) -> tuple[int, int]:

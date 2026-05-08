@@ -16,10 +16,12 @@ import asyncio
 import hashlib
 import logging
 import signal
+import time
 
 from .blockchain import BlockchainClient, OpenJob
 from .config import NodeConfig
 from .encryption import decrypt_prompt
+from .metrics import METRICS_AVAILABLE
 from .p2p import P2PLayer
 from .shard_manager import ShardManager
 from .storage import StorageClient
@@ -108,6 +110,10 @@ class Node:
         while self._running:
             await self.blockchain.heartbeat(endpoint)
             await self.blockchain.auto_settle_expired_jobs()
+            if METRICS_AVAILABLE:
+                from .metrics import heartbeat_timestamp
+
+                heartbeat_timestamp.set(time.time())
             await asyncio.sleep(60)
 
     async def _job_loop(self) -> None:
@@ -125,6 +131,10 @@ class Node:
                     priority_key = -job.payment_amount
                     await self._job_queue.put((priority_key, job))
                     logger.debug("Enqueued job %d (payment: %d)", job.job_id, job.payment_amount)
+                    if METRICS_AVAILABLE:
+                        from .metrics import queue_depth
+
+                        queue_depth.set(self._job_queue.qsize())
 
             await asyncio.sleep(self.config.job_poll_interval_seconds)
 
@@ -136,6 +146,11 @@ class Node:
                 _priority_key, job = await asyncio.wait_for(self._job_queue.get(), timeout=1.0)
             except TimeoutError:
                 continue
+
+            if METRICS_AVAILABLE:
+                from .metrics import queue_depth
+
+                queue_depth.set(self._job_queue.qsize())
 
             try:
                 await self._handle_job(job)
@@ -158,6 +173,14 @@ class Node:
         claimed = await self.blockchain.claim_job(job)
         if not claimed:
             return
+
+        if METRICS_AVAILABLE:
+            from .metrics import active_jobs, jobs_claimed_total
+
+            jobs_claimed_total.inc()
+            active_jobs.inc()
+
+        claim_time = time.monotonic()
 
         # Retry logic: up to _MAX_RETRIES additional attempts after the first.
         result_text: str | None = None
@@ -188,6 +211,11 @@ class Node:
 
         if result_text is None:
             logger.error("Giving up on job %d after all retries: %s", job.job_id, last_exc)
+            if METRICS_AVAILABLE:
+                from .metrics import active_jobs, jobs_failed_total
+
+                jobs_failed_total.inc()
+                active_jobs.dec()
             return
 
         # Store result on decentralized storage (IPFS via web3.storage or Arweave)
@@ -207,9 +235,21 @@ class Node:
                 job.job_id,
                 reason,
             )
+            if METRICS_AVAILABLE:
+                from .metrics import active_jobs, jobs_failed_total
+
+                jobs_failed_total.inc()
+                active_jobs.dec()
             return
 
         await self.blockchain.submit_result(job, result_bytes, result_cid)
+
+        if METRICS_AVAILABLE:
+            from .metrics import active_jobs, inference_latency_seconds, jobs_completed_total
+
+            jobs_completed_total.inc()
+            active_jobs.dec()
+            inference_latency_seconds.observe(time.monotonic() - claim_time)
 
     # ────────────────────────── inference ────────────────────────────────────
 
@@ -406,7 +446,12 @@ class Node:
         last_exc: Exception | None = None
         for attempt in range(1, _IPFS_CIRCUIT_BREAKER_THRESHOLD + 1):
             try:
+                upload_start = time.monotonic()
                 cid = await self.storage.upload_result(result_text, job_id)
+                if METRICS_AVAILABLE:
+                    from .metrics import ipfs_upload_duration_seconds
+
+                    ipfs_upload_duration_seconds.observe(time.monotonic() - upload_start)
                 logger.info("Job %d result uploaded: %s", job_id, cid)
                 return cid
             except Exception as exc:
