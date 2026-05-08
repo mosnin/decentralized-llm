@@ -197,8 +197,7 @@ class TestChatCompletionEndpoint:
 
         before = _metrics["requests_total"]
         mock_result = CompletionResponse(
-            text="ok", job_id=3, model="llama-3.2-3b",
-            tokens_used=1, total_paid=100, node="node"
+            text="ok", job_id=3, model="llama-3.2-3b", tokens_used=1, total_paid=100, node="node"
         )
 
         app = _make_app()

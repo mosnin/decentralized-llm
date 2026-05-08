@@ -217,9 +217,7 @@ class FederatedTrainer:
         self.tokenizer.save_pretrained(output_dir)
         logger.info("LoRA adapter saved to %s", output_dir)
 
-    def _filter_gradient_by_cosine(
-        self, params: list, threshold: float = 0.0
-    ) -> None:
+    def _filter_gradient_by_cosine(self, params: list, threshold: float = 0.0) -> None:
         """
         Zero out gradients whose cosine similarity to the running mean is below
         threshold. This catches sign-flipped Byzantine gradients cheaply.

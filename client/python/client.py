@@ -215,9 +215,7 @@ class DecentralizedLLMClient:
                     "vote_record": vote_record_pda,
                     "voter_token_account": voter_token_account,
                     "voter": self._wallet.public_key,
-                    "system_program": Pubkey.from_string(
-                        "11111111111111111111111111111111"
-                    ),
+                    "system_program": Pubkey.from_string("11111111111111111111111111111111"),
                 }
             ),
         )
