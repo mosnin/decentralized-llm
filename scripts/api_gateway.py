@@ -23,16 +23,21 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from client.python import DecentralizedLLMClient
 from integrations.paysh import PayshHandler
+from node.logging_config import configure_logging, set_correlation_id
+
+configure_logging()
 
 # ────────────────────────── startup / shutdown ────────────────────────────────
 
 _client: DecentralizedLLMClient | None = None
 _paysh: PayshHandler | None = None
+_start_time: float = time.time()
 
 
 @asynccontextmanager
@@ -79,6 +84,20 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class CorrelationIDMiddleware(BaseHTTPMiddleware):
+    """Sets a correlation ID for every request and injects it into the response headers."""
+
+    async def dispatch(self, request: Request, call_next) -> Response:
+        request_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex[:12]
+        set_correlation_id(request_id)
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
+
+
+app.add_middleware(CorrelationIDMiddleware)
 
 # ────────────────────────── rate limiting ────────────────────────────────────
 
@@ -188,6 +207,8 @@ async def list_models():
 
 @app.post("/v1/completions")
 async def create_completion(req: CompletionRequest, request: Request):
+    request_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex[:12]
+    set_correlation_id(request_id)
     _check_rate_limit(request.client.host if request.client else "unknown")
     _metrics["requests_total"] += 1
     completion_id = f"cmpl-{uuid.uuid4().hex[:12]}"
@@ -222,10 +243,10 @@ async def create_completion(req: CompletionRequest, request: Request):
         }
     except TimeoutError as exc:
         _metrics["requests_failed"] += 1
-        raise HTTPException(status_code=504, detail=str(exc))
+        raise HTTPException(status_code=504, detail={"error": str(exc), "request_id": request_id})
     except Exception as exc:
         _metrics["requests_failed"] += 1
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail={"error": str(exc), "request_id": request_id})
 
 
 @app.post("/v1/chat/completions")
@@ -236,6 +257,8 @@ async def create_chat_completion(req: ChatCompletionRequest, request: Request):
     Messages are concatenated into a single prompt using the standard
     ChatML format so any OpenAI client library works out-of-the-box.
     """
+    request_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex[:12]
+    set_correlation_id(request_id)
     _check_rate_limit(request.client.host if request.client else "unknown")
     _metrics["requests_total"] += 1
     chat_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
@@ -280,10 +303,14 @@ async def create_chat_completion(req: ChatCompletionRequest, request: Request):
         }
     except TimeoutError as exc:
         _metrics["requests_failed"] += 1
-        raise HTTPException(status_code=504, detail=str(exc))
+        raise HTTPException(
+            status_code=504, detail={"error": str(exc), "request_id": request_id}
+        )
     except Exception as exc:
         _metrics["requests_failed"] += 1
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(
+            status_code=500, detail={"error": str(exc), "request_id": request_id}
+        )
 
 
 @app.get("/v1/governance/proposals")
@@ -323,12 +350,29 @@ async def paysh_webhook(request: Request):
 
 @app.get("/health")
 async def health():
-    uptime = int(time.time() - _metrics["started_at"])
+    uptime = round(time.time() - _start_time, 1)
     return {
         "status": "ok",
+        "version": "0.1.0",
         "uptime_seconds": uptime,
-        "requests_total": _metrics["requests_total"],
     }
+
+
+@app.get("/ready")
+async def ready():
+    from fastapi.responses import JSONResponse
+
+    from node.health import HealthChecker
+
+    checker = HealthChecker()
+    # _job_queue depth not tracked at gateway level — use 0 as default
+    result = await checker.check_all(
+        client=_client,
+        queue_depth=0,
+        active_jobs=0,
+    )
+    status_code = 200 if result["status"] == "ready" else 503
+    return JSONResponse(content=result, status_code=status_code)
 
 
 @app.get("/metrics")
