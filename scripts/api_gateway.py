@@ -30,6 +30,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from client.python import DecentralizedLLMClient
 from integrations.paysh import PayshHandler
 from node.logging_config import configure_logging, set_correlation_id
+from node.metrics_collector import MetricsCollector
 from node.network_stats import NetworkStatsCollector
 from node.token_streamer import TokenStreamRegistry
 
@@ -41,6 +42,7 @@ _client: DecentralizedLLMClient | None = None
 _paysh: PayshHandler | None = None
 _start_time: float = time.time()
 _stats_collector = NetworkStatsCollector()
+_metrics_collector = MetricsCollector()
 _token_stream_registry = TokenStreamRegistry()
 
 
@@ -463,6 +465,44 @@ async def network_stats():
         "success_rate": success_rate,
         "avg_latency_ms": snap.avg_latency_ms,
         "models_available": snap.models_available,
+    }
+
+
+@app.get("/v1/dashboard", tags=["ops"])
+async def dashboard():
+    """Comprehensive snapshot of node state: inference metrics, network stats, and health."""
+    now = time.time()
+    uptime = now - _start_time
+
+    inf = _metrics_collector.snapshot()
+    net = _stats_collector.snapshot()
+    net_success_rate = (
+        net.completed_jobs_24h / net.total_jobs_24h if net.total_jobs_24h > 0 else 1.0
+    )
+    blockchain_status = "ok" if _client is not None else "unavailable"
+
+    return {
+        "timestamp": now,
+        "uptime_seconds": uptime,
+        "version": "0.1.0",
+        "inference": {
+            "total_requests": inf["total_requests"],
+            "failed_requests": inf["failed_requests"],
+            "success_rate": inf["success_rate"],
+            "avg_latency_ms": inf["avg_latency_ms"],
+            "p95_latency_ms": inf["p95_latency_ms"],
+            "total_tokens": inf["total_tokens"],
+        },
+        "network": {
+            "active_nodes": net.active_nodes,
+            "jobs_24h": net.total_jobs_24h,
+            "success_rate_24h": net_success_rate,
+            "total_stake_lamports": net.total_staked_tokens,
+        },
+        "health": {
+            "status": "ok",
+            "blockchain": blockchain_status,
+        },
     }
 
 
