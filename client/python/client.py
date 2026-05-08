@@ -357,15 +357,31 @@ class DecentralizedLLMClient:
         """Download result from any available IPFS gateway."""
         import aiohttp
 
+        from client.python.retry import RetryConfig, with_retry
+
+        _retry_cfg = RetryConfig(max_attempts=2, base_delay_s=0.5)
+
+        async def _fetch_one_gateway(
+            session: aiohttp.ClientSession, gateway: str, cid: str
+        ) -> str | None:
+            async with session.get(
+                f"{gateway}/{cid}",
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status == 200:
+                    return (await resp.read()).decode("utf-8")
+            return None
+
         async with aiohttp.ClientSession() as session:
             for gateway in IPFS_GATEWAYS:
                 try:
-                    async with session.get(
-                        f"{gateway}/{cid}",
-                        timeout=aiohttp.ClientTimeout(total=30),
-                    ) as resp:
-                        if resp.status == 200:
-                            return (await resp.read()).decode("utf-8")
+                    result = await with_retry(
+                        lambda gw=gateway: _fetch_one_gateway(session, gw, cid),
+                        config=_retry_cfg,
+                        retryable_exceptions=(aiohttp.ClientError, TimeoutError, OSError),
+                    )
+                    if result is not None:
+                        return result
                 except Exception:
                     continue
         raise RuntimeError(f"Could not fetch result CID {cid} from any gateway")

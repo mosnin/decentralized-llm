@@ -2,12 +2,14 @@
 CLI tool for decentralized-LLM node operators.
 
 Usage:
-    python -m scripts.node_cli setup       # Generate Solana keypair and config file
-    python -m scripts.node_cli register    # Register node on-chain
-    python -m scripts.node_cli start       # Start the node server
-    python -m scripts.node_cli status      # Show node status (registration, jobs, earnings)
-    python -m scripts.node_cli withdraw    # Withdraw earnings to wallet
-    python -m scripts.node_cli config show # Show current config as YAML
+    python -m scripts.node_cli setup              # Generate Solana keypair and config file
+    python -m scripts.node_cli register           # Register node on-chain
+    python -m scripts.node_cli start              # Start the node server
+    python -m scripts.node_cli status             # Show node status (registration, jobs, earnings)
+    python -m scripts.node_cli withdraw           # Withdraw earnings to wallet
+    python -m scripts.node_cli config show        # Show current config as YAML
+    python -m scripts.node_cli governance list    # List active governance proposals
+    python -m scripts.node_cli governance vote <proposal_id> <for|against|abstain>
 """
 
 from __future__ import annotations
@@ -380,6 +382,112 @@ def cmd_config_show(args: argparse.Namespace) -> None:
     print(yaml.dump(display, default_flow_style=False, sort_keys=True), end="")
 
 
+# ─────────────────────────── governance subcommands ────────────────────────
+
+
+def cmd_governance_list(args: argparse.Namespace) -> None:
+    """List active governance proposals."""
+    config_path = _config_path_from_args(args)
+    config = _load_config(config_path)
+
+    governance_program = "3CvE7tX9rMwPfBgY2nKjH6oL4sQ8uZaD5mR1iW0eN9T"
+    wallet_path = config.get("wallet_path", str(Path.home() / ".config/solana/id.json"))
+    rpc_url = config.get("rpc_url", "https://api.mainnet-beta.solana.com")
+
+    print("Anchor CLI command:\n")
+    print(
+        f"    anchor invoke {governance_program} get_proposals \\\n"
+        f"        --provider.wallet {wallet_path} \\\n"
+        f"        --provider.cluster {rpc_url}"
+    )
+    print()
+
+    if not args.execute:
+        print("(Dry run – pass --execute to fetch proposals via the client SDK.)")
+        return
+
+    from client.python import DecentralizedLLMClient
+
+    async def _run() -> None:
+        async with DecentralizedLLMClient(
+            wallet_path=wallet_path,
+            rpc_url=rpc_url,
+        ) as client:
+            proposals = await client.get_governance_proposals()
+
+        if not proposals:
+            print("No active proposals found.")
+            return
+
+        col_w = [6, 40, 12, 12, 12, 20]
+        header = (
+            f"{'ID':<{col_w[0]}}  "
+            f"{'Title':<{col_w[1]}}  "
+            f"{'Status':<{col_w[2]}}  "
+            f"{'For':>{col_w[3]}}  "
+            f"{'Against':>{col_w[4]}}  "
+            f"{'Ends':<{col_w[5]}}"
+        )
+        sep = "  ".join("─" * w for w in col_w)
+        print(header)
+        print(sep)
+        for p in proposals:
+            print(
+                f"{str(p['id']):<{col_w[0]}}  "
+                f"{str(p['title']):<{col_w[1]}}  "
+                f"{str(p['status']):<{col_w[2]}}  "
+                f"{str(p['votes_for']):>{col_w[3]}}  "
+                f"{str(p['votes_against']):>{col_w[4]}}  "
+                f"{str(p['voting_ends_at']):<{col_w[5]}}"
+            )
+
+    asyncio.run(_run())
+
+
+def cmd_governance_vote(args: argparse.Namespace) -> None:
+    """Cast a vote on a governance proposal."""
+    config_path = _config_path_from_args(args)
+    config = _load_config(config_path)
+
+    valid_choices = {"for", "against", "abstain"}
+    if args.choice not in valid_choices:
+        print(
+            f"Error: choice must be one of {sorted(valid_choices)}, got '{args.choice}'",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    governance_program = "3CvE7tX9rMwPfBgY2nKjH6oL4sQ8uZaD5mR1iW0eN9T"
+    wallet_path = config.get("wallet_path", str(Path.home() / ".config/solana/id.json"))
+    rpc_url = config.get("rpc_url", "https://api.mainnet-beta.solana.com")
+
+    print("Anchor CLI command:\n")
+    print(
+        f"    anchor invoke {governance_program} cast_vote \\\n"
+        f"        --proposal-id {args.proposal_id} \\\n"
+        f"        --choice {args.choice} \\\n"
+        f"        --provider.wallet {wallet_path} \\\n"
+        f"        --provider.cluster {rpc_url}"
+    )
+    print()
+
+    if not args.execute:
+        print("(Dry run – pass --execute to cast the vote via the client SDK.)")
+        return
+
+    from client.python import DecentralizedLLMClient
+
+    async def _run() -> None:
+        async with DecentralizedLLMClient(
+            wallet_path=wallet_path,
+            rpc_url=rpc_url,
+        ) as client:
+            await client.vote(args.proposal_id, args.choice)
+        print(f"Vote '{args.choice}' cast on proposal {args.proposal_id}.")
+
+    asyncio.run(_run())
+
+
 # ─────────────────────────── argument parser ───────────────────────────────
 
 _CONFIG_PATH_HELP = f"Path to config YAML (default: {DEFAULT_CONFIG_PATH})"
@@ -475,6 +583,58 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_config_path(sp_config_show)
     sp_config_show.set_defaults(func=cmd_config_show)
+
+    # ── governance ─────────────────────────────────────────────────────────
+    sp_gov = subparsers.add_parser(
+        "governance",
+        help="Participate in DAO governance",
+        description="List proposals and cast votes in the decentralized governance system.",
+    )
+    _add_config_path(sp_gov)
+    gov_sub = sp_gov.add_subparsers(dest="governance_action", metavar="ACTION")
+    gov_sub.required = True
+
+    # governance list
+    sp_gov_list = gov_sub.add_parser(
+        "list",
+        help="List active governance proposals",
+        description=(
+            "Print the Anchor CLI command for fetching proposals. "
+            "Pass --execute to fetch and display them as a table."
+        ),
+    )
+    _add_config_path(sp_gov_list)
+    sp_gov_list.add_argument(
+        "--execute",
+        action="store_true",
+        default=False,
+        help="Actually fetch proposals via the client SDK",
+    )
+    sp_gov_list.set_defaults(func=cmd_governance_list)
+
+    # governance vote
+    sp_gov_vote = gov_sub.add_parser(
+        "vote",
+        help="Cast a vote on a governance proposal",
+        description=(
+            "Print the Anchor CLI command for voting. "
+            "Pass --execute to send the vote transaction via the client SDK."
+        ),
+    )
+    _add_config_path(sp_gov_vote)
+    sp_gov_vote.add_argument("proposal_id", type=int, help="Proposal ID (integer)")
+    sp_gov_vote.add_argument(
+        "choice",
+        type=str,
+        help="Vote choice: for, against, or abstain",
+    )
+    sp_gov_vote.add_argument(
+        "--execute",
+        action="store_true",
+        default=False,
+        help="Actually cast the vote via the client SDK",
+    )
+    sp_gov_vote.set_defaults(func=cmd_governance_vote)
 
     return parser
 
