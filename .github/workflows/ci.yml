@@ -53,7 +53,7 @@ jobs:
       - name: Install Node deps
         run: npm install
         working-directory: .
-        continue-on-error: true  # no package.json yet — Phase 3 adds TS tests
+        continue-on-error: true
 
       - name: Rustfmt check
         run: cargo fmt --all -- --check
