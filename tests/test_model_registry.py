@@ -9,7 +9,6 @@ import pytest
 from node.config import NodeConfig
 from node.model_registry import ModelRegistry
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -179,7 +178,10 @@ class TestModelRegistry:
             with patch.object(
                 asyncio.get_event_loop(), "run_in_executor", side_effect=_sync_executor
             ):
-                with patch("node.model_registry.asyncio.gather", side_effect=tracking_gather) as mock_gather:
+                with patch(
+                    "node.model_registry.asyncio.gather",
+                    side_effect=tracking_gather,
+                ) as mock_gather:
                     await registry.load_all(["alpha", "beta", "gamma"], config)
 
         # asyncio.gather was called once with three coroutines
