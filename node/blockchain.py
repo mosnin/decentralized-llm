@@ -11,6 +11,7 @@ Responsibilities:
 import asyncio
 import hashlib
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -209,8 +210,6 @@ class BlockchainClient:
 
         settled = 0
         try:
-            import time
-
             now = int(time.time())
             jobs = await self._inference_program.account["Job"].all()
             for j in jobs:
@@ -243,16 +242,12 @@ class BlockchainClient:
         if not self._inference_program:
             return False
 
-        import time
-
         challenge_window_seconds = 300  # matches CHALLENGE_WINDOW_SECONDS in Rust
         poll_interval = 5.0
         deadline = time.monotonic() + challenge_window_seconds
 
         while time.monotonic() < deadline:
             try:
-                from solders.pubkey import Pubkey
-
                 seeds = [b"job", job_id.to_bytes(8, "little")]
                 job_pda, _ = Pubkey.find_program_address(
                     seeds,
@@ -268,7 +263,7 @@ class BlockchainClient:
                     return False
             except Exception as exc:
                 logger.warning("watch_for_challenges: failed to fetch job %d: %s", job_id, exc)
-            await __import__("asyncio").sleep(poll_interval)
+            await asyncio.sleep(poll_interval)
 
         logger.info("Job %d: challenge window closed without dispute", job_id)
         return False

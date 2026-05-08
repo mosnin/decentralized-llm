@@ -111,19 +111,46 @@ class Node:
             await asyncio.sleep(60)
 
     async def _job_loop(self) -> None:
+        """Poll the blockchain for open jobs and enqueue new ones (deduplication here)."""
         model_id = self._model_id_bytes()
         while self._running:
-            if len(self._active_jobs) < self.config.max_concurrent_jobs:
-                jobs = await self.blockchain.fetch_open_jobs(model_id)
-                for job in jobs:
-                    if job.job_id not in self._active_jobs:
-                        task = asyncio.create_task(self._handle_job(job))
-                        self._active_jobs[job.job_id] = task
-                        task.add_done_callback(
-                            lambda t, jid=job.job_id: self._active_jobs.pop(jid, None)
-                        )
+            jobs = await self.blockchain.fetch_open_jobs(model_id)
+            for job in jobs:
+                if job.job_id not in self._active_jobs:
+                    # Mark as seen immediately to prevent re-enqueuing on the
+                    # next poll before the worker picks it up.
+                    self._active_jobs[job.job_id] = True
+                    # Negate payment_amount: lower value = higher priority in
+                    # asyncio.PriorityQueue (min-heap).
+                    priority_key = -job.payment_amount
+                    await self._job_queue.put((priority_key, job))
+                    logger.debug("Enqueued job %d (payment: %d)", job.job_id, job.payment_amount)
 
             await asyncio.sleep(self.config.job_poll_interval_seconds)
+
+    async def _job_worker(self, worker_id: int) -> None:
+        """Drain the priority queue and process jobs one at a time per worker."""
+        logger.debug("Job worker %d started", worker_id)
+        while self._running:
+            try:
+                _priority_key, job = await asyncio.wait_for(self._job_queue.get(), timeout=1.0)
+            except TimeoutError:
+                continue
+
+            try:
+                await self._handle_job(job)
+            except Exception as exc:
+                logger.error(
+                    "Unhandled exception in worker %d for job %d: %s",
+                    worker_id,
+                    job.job_id,
+                    exc,
+                )
+            finally:
+                self._active_jobs.pop(job.job_id, None)
+                self._job_queue.task_done()
+
+        logger.debug("Job worker %d stopping", worker_id)
 
     async def _handle_job(self, job: OpenJob) -> None:
         logger.info("Handling job %d (payment: %d tokens)", job.job_id, job.payment_amount)
@@ -132,10 +159,35 @@ class Node:
         if not claimed:
             return
 
-        try:
-            result_text = await self._run_inference(job)
-        except Exception as exc:
-            logger.error("Inference failed for job %d: %s", job.job_id, exc)
+        # Retry logic: up to _MAX_RETRIES additional attempts after the first.
+        result_text: str | None = None
+        last_exc: Exception | None = None
+        for attempt in range(1 + _MAX_RETRIES):
+            try:
+                result_text = await self._run_inference(job)
+                break
+            except Exception as exc:
+                last_exc = exc
+                if attempt < _MAX_RETRIES:
+                    logger.warning(
+                        "Inference failed for job %d (attempt %d/%d): %s — retrying in %.0fs",
+                        job.job_id,
+                        attempt + 1,
+                        1 + _MAX_RETRIES,
+                        exc,
+                        _RETRY_DELAY,
+                    )
+                    await asyncio.sleep(_RETRY_DELAY)
+                else:
+                    logger.error(
+                        "Inference failed for job %d after %d attempts: %s",
+                        job.job_id,
+                        1 + _MAX_RETRIES,
+                        exc,
+                    )
+
+        if result_text is None:
+            logger.error("Giving up on job %d after all retries: %s", job.job_id, last_exc)
             return
 
         # Store result on decentralized storage (IPFS via web3.storage or Arweave)
@@ -335,7 +387,13 @@ class Node:
         raise TimeoutError(f"Timed out waiting for result of job {job_id}")
 
     async def _upload_result(self, job_id: int, result_text: str) -> str:
-        """Upload inference result to Lighthouse (IPFS+Filecoin) and return the CID."""
+        """
+        Upload inference result to Lighthouse (IPFS+Filecoin) and return the CID.
+
+        Circuit breaker: if the IPFS upload fails
+        _IPFS_CIRCUIT_BREAKER_THRESHOLD times, fall back to a deterministic
+        content-hash placeholder so the job can still be submitted on-chain.
+        """
         if self.storage is None:
             content_hash = hashlib.sha256(result_text.encode()).hexdigest()
             logger.warning(
@@ -345,9 +403,32 @@ class Node:
             )
             return f"bafkrei{content_hash[:32]}"  # deterministic placeholder
 
-        cid = await self.storage.upload_result(result_text, job_id)
-        logger.info("Job %d result uploaded: %s", job_id, cid)
-        return cid
+        last_exc: Exception | None = None
+        for attempt in range(1, _IPFS_CIRCUIT_BREAKER_THRESHOLD + 1):
+            try:
+                cid = await self.storage.upload_result(result_text, job_id)
+                logger.info("Job %d result uploaded: %s", job_id, cid)
+                return cid
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "IPFS upload failed for job %d (attempt %d/%d): %s",
+                    job_id,
+                    attempt,
+                    _IPFS_CIRCUIT_BREAKER_THRESHOLD,
+                    exc,
+                )
+
+        # All upload attempts exhausted — use the content-hash placeholder.
+        content_hash = hashlib.sha256(result_text.encode()).hexdigest()
+        logger.error(
+            "IPFS circuit breaker tripped for job %d after %d attempts (%s). "
+            "Falling back to content-hash placeholder.",
+            job_id,
+            _IPFS_CIRCUIT_BREAKER_THRESHOLD,
+            last_exc,
+        )
+        return f"bafkrei{content_hash[:32]}"
 
     async def _ensure_registered(self) -> None:
         import torch
