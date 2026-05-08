@@ -21,6 +21,7 @@ import time
 from .blockchain import BlockchainClient, OpenJob
 from .config import NodeConfig
 from .encryption import decrypt_prompt
+from .integrity import IntegrityError, compute_model_id, verify_model_id, verify_prompt_hash
 from .logging_config import set_correlation_id
 from .metrics import METRICS_AVAILABLE
 from .p2p import P2PLayer
@@ -363,6 +364,8 @@ class Node:
             )
 
         blob = await self.storage.download(job.prompt_cid)
+
+        verify_prompt_hash(blob, job.prompt_hash)
 
         wallet_seed = self.config.wallet_private_key_bytes()
         return decrypt_prompt(blob, wallet_seed, job.prompt_hash)

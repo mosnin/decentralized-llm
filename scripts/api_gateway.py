@@ -303,14 +303,10 @@ async def create_chat_completion(req: ChatCompletionRequest, request: Request):
         }
     except TimeoutError as exc:
         _metrics["requests_failed"] += 1
-        raise HTTPException(
-            status_code=504, detail={"error": str(exc), "request_id": request_id}
-        )
+        raise HTTPException(status_code=504, detail={"error": str(exc), "request_id": request_id})
     except Exception as exc:
         _metrics["requests_failed"] += 1
-        raise HTTPException(
-            status_code=500, detail={"error": str(exc), "request_id": request_id}
-        )
+        raise HTTPException(status_code=500, detail={"error": str(exc), "request_id": request_id})
 
 
 @app.get("/v1/governance/proposals")
