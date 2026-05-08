@@ -22,6 +22,7 @@ from .blockchain import BlockchainClient, OpenJob
 from .config import NodeConfig
 from .encryption import decrypt_prompt
 from .integrity import IntegrityError, compute_model_id, verify_model_id, verify_prompt_hash
+from .job_cleaner import JobCleaner
 from .logging_config import set_correlation_id
 from .metrics import METRICS_AVAILABLE
 from .model_registry import ModelRegistry
@@ -98,10 +99,12 @@ class Node:
             for i in range(self.config.max_concurrent_jobs)
         ]
         heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        cleaner_task = asyncio.create_task(JobCleaner(self).run())
         try:
             await self._job_loop()
         finally:
             heartbeat_task.cancel()
+            cleaner_task.cancel()
             for task in worker_tasks:
                 task.cancel()
 
