@@ -8,18 +8,44 @@ on:
 
 jobs:
   # ── Rust / Anchor programs ─────────────────────────────────────────────────
-  anchor-build:
-    name: Anchor build & test
+  rust-check:
+    name: Rust check & lint
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
+      - name: Install Rust 1.78.0
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.78.0"
           components: clippy, rustfmt
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Rustfmt check
+        run: cargo fmt --all -- --check
+        continue-on-error: true
+
+      - name: cargo check (validates Rust without BPF toolchain)
+        run: cargo check --all-targets
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+        continue-on-error: true
+
+  anchor-build:
+    name: Anchor build & test
+    runs-on: ubuntu-latest
+    continue-on-error: true   # BPF toolchain heavy — non-blocking
+    needs: rust-check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.78.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.78.0"
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
@@ -31,35 +57,41 @@ jobs:
           path: |
             ~/.local/share/solana
             ~/.cache/solana
-          key: solana-1.18.0-platformtools-${{ runner.os }}-v3
+          key: solana-1.18.0-platformtools-${{ runner.os }}-v5
 
       - name: Install Solana CLI
         if: steps.cache-solana.outputs.cache-hit != 'true'
-        run: |
-          sh -c "$(curl -sSfL https://release.solana.com/v1.18.0/install)"
+        run: sh -c "$(curl -sSfL https://release.solana.com/v1.18.0/install)"
 
-      - name: Set Solana PATH
+      - name: Add Solana to PATH
         run: echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
 
-      - name: Pre-warm BPF platform tools
+      - name: Install BPF platform tools
         run: |
-          # cargo build-sbf downloads platform-tools on first run; do it explicitly
-          # so the cache captures them for subsequent runs
-          cargo build-sbf --version 2>/dev/null || \
-            "$HOME/.local/share/solana/install/active_release/bin/cargo-build-sbf" --version || true
+          BPF_SDK="$HOME/.local/share/solana/install/active_release/bin/sdk/sbf"
+          DEPS_DIR="$BPF_SDK/dependencies"
+          if [ -d "$DEPS_DIR/platform-tools" ]; then
+            echo "Platform tools already present (cached)."
+          else
+            # Detect the required version from the SDK version file if available,
+            # otherwise fall back to the known version for Solana 1.18.0
+            VERSION=$(cat "$BPF_SDK/version.yml" 2>/dev/null \
+              | grep -oP '(?<=platform_tools_version: )v[0-9]+\.[0-9]+' \
+              || echo "v1.41")
+            echo "Downloading platform-tools $VERSION ..."
+            mkdir -p "$DEPS_DIR"
+            curl -fSL \
+              "https://github.com/anza-xyz/platform-tools/releases/download/$VERSION/platform-tools-linux-x86_64.tar.bz2" \
+              -o /tmp/platform-tools.tar.bz2
+            tar -xjf /tmp/platform-tools.tar.bz2 -C "$DEPS_DIR"
+            echo "Platform tools installed."
+          fi
 
       - name: Install Anchor CLI
         run: npm install -g @coral-xyz/anchor-cli@0.30.1
 
       - name: Install Node deps
         run: npm install
-
-      - name: Rustfmt check
-        run: cargo fmt --all -- --check
-        continue-on-error: true
-
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
         continue-on-error: true
 
       - name: Anchor build
@@ -93,7 +125,7 @@ jobs:
       - name: Mypy (node + client + integrations)
         run: |
           mypy node/ client/ integrations/ --ignore-missing-imports --no-strict-optional
-        continue-on-error: true  # strict mode enabled incrementally
+        continue-on-error: true
 
   python-tests:
     name: Python unit tests
@@ -110,13 +142,10 @@ jobs:
       - name: Install deps (no GPU)
         run: |
           pip install pytest pytest-asyncio pytest-mock
-          # Cryptography for ECIES prompt encryption tests
           pip install cryptography
-          # CPU-only torch (avoids 2GB GPU download in CI)
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install transformers accelerate peft
           pip install fastapi httpx aiohttp
-          # Lighthouse storage SDK
           pip install lighthouseweb3
 
       - name: Run tests
@@ -135,4 +164,4 @@ jobs:
           scan-type: "fs"
           scan-ref: "."
           severity: "HIGH,CRITICAL"
-          exit-code: "0"  # warn only until baseline is set
+          exit-code: "0"
