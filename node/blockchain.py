@@ -74,6 +74,8 @@ class BlockchainClient:
 
         logger.info("Connected to Solana RPC: %s", self.config.rpc_url)
         logger.info("Node wallet: %s", keypair.pubkey())
+        logger.info("inference-market program: %s", self.config.inference_market_program)
+        logger.info("compute-registry program: %s", self.config.compute_registry_program)
 
     async def fetch_open_jobs(self, model_id: bytes) -> list[OpenJob]:
         """
@@ -267,6 +269,50 @@ class BlockchainClient:
 
         logger.info("Job %d: challenge window closed without dispute", job_id)
         return False
+
+    async def get_wallet_balance(self) -> float:
+        """Return the wallet's SOL balance as a float (in SOL, not lamports)."""
+        if not self._client or not self._wallet:
+            return 0.0
+        try:
+            resp = await self._client.get_balance(self._wallet.public_key)
+            lamports = resp.value
+            sol = lamports / 1_000_000_000
+            logger.debug("Wallet balance: %.4f SOL (%d lamports)", sol, lamports)
+            return sol
+        except Exception as exc:
+            logger.warning("Failed to fetch wallet balance: %s", exc)
+            return 0.0
+
+    async def request_airdrop(self, amount_lamports: int = 1_000_000_000) -> bool:
+        """
+        Request an airdrop on devnet/testnet. No-op on mainnet.
+
+        Args:
+            amount_lamports: Amount to airdrop in lamports (default 1 SOL).
+
+        Returns:
+            True if the airdrop was requested successfully, False otherwise.
+        """
+        if not self._client or not self._wallet:
+            return False
+
+        rpc_url = self.config.rpc_url
+        if "mainnet" in rpc_url:
+            logger.warning("request_airdrop called on mainnet — skipping")
+            return False
+
+        try:
+            resp = await self._client.request_airdrop(self._wallet.public_key, amount_lamports)
+            logger.info(
+                "Airdrop of %d lamports requested, tx: %s",
+                amount_lamports,
+                resp.value,
+            )
+            return True
+        except Exception as exc:
+            logger.warning("Airdrop request failed: %s", exc)
+            return False
 
     async def close(self) -> None:
         if self._client:
