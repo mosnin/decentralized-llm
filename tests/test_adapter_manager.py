@@ -10,9 +10,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import time
-from dataclasses import dataclass, field
-from typing import Any
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -57,7 +55,7 @@ def _spec(
     target_modules: list[str] | None = None,
     checkpoint_path: str = "/nonexistent/adapter_a.pt",
     description: str = "Test adapter",
-) -> "AdapterSpec":
+):
     from node.adapter_manager import AdapterSpec
 
     return AdapterSpec(
@@ -564,10 +562,8 @@ class TestInferenceCount:
         """
         Simulate the forward hook being called and verify inference_count rises.
         """
-        from node.adapter_manager import _make_lora_hook
-
         # Build a minimal slot with a real spec
-        from node.adapter_manager import AdapterSlot
+        from node.adapter_manager import AdapterSlot, _make_lora_hook
 
         s = _spec("adapter-a", lora_rank=4, lora_alpha=8.0)
         slot = AdapterSlot(spec=s)
@@ -579,7 +575,6 @@ class TestInferenceCount:
         lora_B.T = MagicMock()
 
         # Patch torch inside adapter_manager so matmul works
-        import torch  # This is the stub from sys.modules
 
         scaling = s.lora_alpha / s.lora_rank  # 2.0
 
@@ -601,7 +596,7 @@ class TestInferenceCount:
 
     def test_inference_count_not_incremented_when_empty_inputs(self, manager):
         """Hook with empty inputs tuple should return output unchanged, count stays 0."""
-        from node.adapter_manager import _make_lora_hook, AdapterSlot
+        from node.adapter_manager import AdapterSlot, _make_lora_hook
 
         s = _spec("adapter-a")
         slot = AdapterSlot(spec=s)
@@ -618,7 +613,7 @@ class TestInferenceCount:
 
     def test_inference_count_per_slot_not_shared(self, manager):
         """Each slot tracks its own inference count independently."""
-        from node.adapter_manager import _make_lora_hook, AdapterSlot
+        from node.adapter_manager import AdapterSlot, _make_lora_hook
 
         s_a = _spec("adapter-a")
         s_b = _spec("adapter-b")

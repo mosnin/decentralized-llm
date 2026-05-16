@@ -217,9 +217,7 @@ class AdapterManager:
             lora_B = slot.weights[name]["lora_B"]
 
             # Build a closure that captures (lora_A, lora_B, scaling, slot)
-            handle = module.register_forward_hook(
-                _make_lora_hook(lora_A, lora_B, scaling, slot)
-            )
+            handle = module.register_forward_hook(_make_lora_hook(lora_A, lora_B, scaling, slot))
             self._hook_handles.append(handle)
 
         self._active_id = adapter_id

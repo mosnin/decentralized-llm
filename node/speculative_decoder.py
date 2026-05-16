@@ -26,7 +26,7 @@ environments where PyTorch is not installed.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -79,7 +79,7 @@ class DraftModel:
     # Public
     # ------------------------------------------------------------------
 
-    def forward(self, input_ids: "torch.Tensor") -> "torch.Tensor":
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         """
         Run one forward pass and return logits of shape ``[batch, seq_len, vocab_size]``.
         """
@@ -97,7 +97,7 @@ class DraftModel:
 
         return logits
 
-    def sample(self, logits: "torch.Tensor") -> "torch.Tensor":
+    def sample(self, logits: torch.Tensor) -> torch.Tensor:
         """
         Sample a single token from ``logits`` of shape ``[batch, vocab_size]``.
 
@@ -117,7 +117,7 @@ class DraftModel:
         token = torch.multinomial(probs, num_samples=1)  # [batch, 1]
         return token
 
-    def get_probs(self, logits: "torch.Tensor") -> "torch.Tensor":
+    def get_probs(self, logits: torch.Tensor) -> torch.Tensor:
         """
         Convert ``logits`` (shape ``[batch, vocab_size]``) to a probability
         distribution, taking temperature into account.
@@ -128,8 +128,8 @@ class DraftModel:
         return torch.softmax(scaled, dim=-1)
 
     def generate_draft(
-        self, input_ids: "torch.Tensor", k: int = 5
-    ) -> tuple["torch.Tensor", "torch.Tensor"]:
+        self, input_ids: torch.Tensor, k: int = 5
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Autoregressively generate *k* draft tokens.
 
@@ -150,24 +150,23 @@ class DraftModel:
         """
         import torch  # noqa: PLC0415
 
-        batch = input_ids.shape[0]
         all_tokens: list[torch.Tensor] = []
         all_probs: list[torch.Tensor] = []
 
         current_ids = input_ids
         for _ in range(k):
-            logits = self.forward(current_ids)          # [batch, seq, vocab]
-            last_logits = logits[:, -1, :]              # [batch, vocab]
-            probs = self.get_probs(last_logits)         # [batch, vocab]
-            token = self.sample(last_logits)            # [batch, 1]
+            logits = self.forward(current_ids)  # [batch, seq, vocab]
+            last_logits = logits[:, -1, :]  # [batch, vocab]
+            probs = self.get_probs(last_logits)  # [batch, vocab]
+            token = self.sample(last_logits)  # [batch, 1]
 
             all_tokens.append(token)
-            all_probs.append(probs.unsqueeze(1))        # [batch, 1, vocab]
+            all_probs.append(probs.unsqueeze(1))  # [batch, 1, vocab]
 
             current_ids = torch.cat([current_ids, token], dim=1)
 
-        draft_tokens = torch.cat(all_tokens, dim=1)     # [batch, k]
-        draft_probs = torch.cat(all_probs, dim=1)       # [batch, k, vocab]
+        draft_tokens = torch.cat(all_tokens, dim=1)  # [batch, k]
+        draft_probs = torch.cat(all_probs, dim=1)  # [batch, k, vocab]
         return draft_tokens, draft_probs
 
 
@@ -183,7 +182,7 @@ class DecodeStats:
     total_draft_tokens: int = 0
     accepted_tokens: int = 0
     rejected_tokens: int = 0
-    correction_tokens: int = 0   # tokens added via the residual distribution
+    correction_tokens: int = 0  # tokens added via the residual distribution
 
     @property
     def acceptance_rate(self) -> float:
@@ -237,8 +236,8 @@ class SpeculativeDecoder:
     # ------------------------------------------------------------------
 
     def generate_draft(
-        self, input_ids: "torch.Tensor", k: int = 5
-    ) -> tuple["torch.Tensor", "torch.Tensor"]:
+        self, input_ids: torch.Tensor, k: int = 5
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Use the draft model to speculatively generate *k* candidate tokens.
 
@@ -270,12 +269,12 @@ class SpeculativeDecoder:
 
     def verify_and_accept(
         self,
-        input_ids: "torch.Tensor",
-        draft_tokens: "torch.Tensor",
-        verifier_logits: "torch.Tensor",
-        draft_probs: "torch.Tensor | None" = None,
+        input_ids: torch.Tensor,
+        draft_tokens: torch.Tensor,
+        verifier_logits: torch.Tensor,
+        draft_probs: torch.Tensor | None = None,
         temperature: float | None = None,
-    ) -> tuple["torch.Tensor", int, int, int]:
+    ) -> tuple[torch.Tensor, int, int, int]:
         """
         Apply the Leviathan et al. (2023) speculative acceptance criterion.
 
@@ -350,14 +349,14 @@ class SpeculativeDecoder:
         first_rejection_pos = k  # sentinel: no rejection
 
         for i in range(k):
-            q_i = target_probs_all[:, i, :]    # [batch, vocab]
-            x_i = draft_tokens[:, i]           # [batch]
+            q_i = target_probs_all[:, i, :]  # [batch, vocab]
+            x_i = draft_tokens[:, i]  # [batch]
 
             # Gather q(x_i): target probability at the draft token
             q_xi = q_i.gather(1, x_i.unsqueeze(1)).squeeze(1)  # [batch]
 
             if draft_probs is not None:
-                p_i = draft_probs[:, i, :]                       # [batch, vocab]
+                p_i = draft_probs[:, i, :]  # [batch, vocab]
                 p_xi = p_i.gather(1, x_i.unsqueeze(1)).squeeze(1)  # [batch]
                 # Avoid division by zero
                 alpha = torch.clamp(q_xi / (p_xi + 1e-10), max=1.0)  # [batch]
@@ -370,7 +369,7 @@ class SpeculativeDecoder:
 
             if accept_mask.all():
                 # All batch elements accept token i
-                collected.append(x_i.unsqueeze(1))   # [batch, 1]
+                collected.append(x_i.unsqueeze(1))  # [batch, 1]
                 n_accepted += 1
             else:
                 # At least one batch element rejects; treat as a reject step.
@@ -416,11 +415,11 @@ class SpeculativeDecoder:
 
     def decode_speculative(
         self,
-        input_ids: "torch.Tensor",
+        input_ids: torch.Tensor,
         max_tokens: int,
         draft_steps: int = 5,
         temperature: float | None = None,
-    ) -> tuple["torch.Tensor", "DecodeStats"]:
+    ) -> tuple[torch.Tensor, DecodeStats]:
         """
         Full speculative decoding loop.
 
@@ -469,7 +468,7 @@ class SpeculativeDecoder:
             # ---- Vanilla autoregressive fallback ----------------------------
             logger.debug("No draft model; using vanilla autoregressive decoding.")
             while total_new < max_tokens:
-                logits = self._run_verifier(context)           # [batch, seq, vocab]
+                logits = self._run_verifier(context)  # [batch, seq, vocab]
                 last_logits = logits[:, -1, :] / max(temp, 1e-8)
                 probs = torch.softmax(last_logits, dim=-1)
                 token = torch.multinomial(probs, num_samples=1)  # [batch, 1]
@@ -479,8 +478,9 @@ class SpeculativeDecoder:
                 if self.eos_token_id is not None and (token == self.eos_token_id).any():
                     break
             generated = (
-                torch.cat(all_new_tokens, dim=1) if all_new_tokens else
-                torch.zeros((input_ids.shape[0], 0), dtype=input_ids.dtype)
+                torch.cat(all_new_tokens, dim=1)
+                if all_new_tokens
+                else torch.zeros((input_ids.shape[0], 0), dtype=input_ids.dtype)
             )
             return generated, stats
 
@@ -495,13 +495,13 @@ class SpeculativeDecoder:
 
             # Step 2: verifier forward pass over (context + draft_tokens)
             extended = torch.cat([context, draft_tokens], dim=1)  # [batch, seq+k]
-            verifier_logits_all = self._run_verifier(extended)    # [batch, seq+k, vocab]
+            verifier_logits_all = self._run_verifier(extended)  # [batch, seq+k, vocab]
 
             # Extract the k+1 logit positions we care about:
             # position seq-1 predicts draft_tokens[:,0]; ...; position seq+k-1 predicts bonus
             seq_len = context.shape[1]
             # Slice from position (seq_len - 1) to (seq_len - 1 + k + 1)
-            verifier_logits = verifier_logits_all[:, seq_len - 1: seq_len - 1 + k + 1, :]
+            verifier_logits = verifier_logits_all[:, seq_len - 1 : seq_len - 1 + k + 1, :]
             # Shape: [batch, k+1, vocab]
 
             # Step 3: accept / reject
@@ -539,7 +539,7 @@ class SpeculativeDecoder:
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _run_verifier(self, input_ids: "torch.Tensor") -> "torch.Tensor":
+    def _run_verifier(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Run the verifier and return logits ``[batch, seq_len, vocab_size]``."""
         out = self.verifier_fn(input_ids)
         if hasattr(out, "logits"):

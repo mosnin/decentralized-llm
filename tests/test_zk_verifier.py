@@ -10,17 +10,15 @@ from __future__ import annotations
 
 import hashlib
 import os
-import struct
-import time
 
 import pytest
 
 from node.zk_verifier import ActivationSketch, ComputeCommitment, InferenceVerifier
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _sha256(data: bytes) -> bytes:
     return hashlib.sha256(data).digest()
@@ -36,6 +34,7 @@ def _generate_key_pair() -> tuple[bytes, bytes]:
     """
     try:
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
         priv = Ed25519PrivateKey.generate()
         priv_bytes = priv.private_bytes_raw()
         pub_bytes = priv.public_key().public_bytes_raw()
@@ -74,6 +73,7 @@ def _make_commitment(
 # 1. Commitment creation
 # ---------------------------------------------------------------------------
 
+
 class TestCommitmentCreation:
     def test_fields_populated(self):
         """create_commitment populates all required fields."""
@@ -90,7 +90,7 @@ class TestCommitmentCreation:
 
     def test_input_hash_matches_sha256(self):
         """input_hash must equal SHA-256 of the supplied input bytes."""
-        input_bytes = b"\xAA\xBB\xCC" * 10
+        input_bytes = b"\xaa\xbb\xcc" * 10
         commitment, _priv, _pub = _make_commitment(input_bytes=input_bytes)
 
         assert commitment.input_hash == _sha256(input_bytes)
@@ -117,6 +117,7 @@ class TestCommitmentCreation:
 # ---------------------------------------------------------------------------
 # 2. Commitment verification — valid path
 # ---------------------------------------------------------------------------
+
 
 class TestCommitmentVerificationValid:
     def test_valid_commitment_passes(self):
@@ -148,6 +149,7 @@ class TestCommitmentVerificationValid:
 # 3. Commitment rejection — tampered output hash
 # ---------------------------------------------------------------------------
 
+
 class TestCommitmentRejectionTamperedOutput:
     def test_tampered_output_hash_fails_signature(self):
         """
@@ -161,7 +163,7 @@ class TestCommitmentRejectionTamperedOutput:
         tampered = ComputeCommitment(
             job_id=commitment.job_id,
             input_hash=commitment.input_hash,
-            output_hash=_sha256(b"fake output"),   # different!
+            output_hash=_sha256(b"fake output"),  # different!
             activation_sketch=commitment.activation_sketch,
             timestamp=commitment.timestamp,
             node_id=commitment.node_id,
@@ -180,6 +182,7 @@ class TestCommitmentRejectionTamperedOutput:
 # ---------------------------------------------------------------------------
 # 4. Commitment rejection — bad signature
 # ---------------------------------------------------------------------------
+
 
 class TestCommitmentRejectionBadSignature:
     def test_wrong_public_key_fails(self):
@@ -203,6 +206,7 @@ class TestCommitmentRejectionBadSignature:
         commitment, _priv, pub = _make_commitment(input_bytes=input_bytes)
 
         import base64
+
         raw_sig = bytearray(base64.b64decode(commitment.signature_b64))
         raw_sig[0] ^= 0xFF  # flip first byte
         bad_sig_b64 = base64.b64encode(bytes(raw_sig)).decode()
@@ -242,6 +246,7 @@ class TestCommitmentRejectionBadSignature:
 # ---------------------------------------------------------------------------
 # 5. Sketch consistency — same input → same sketch
 # ---------------------------------------------------------------------------
+
 
 class TestSketchConsistencySameInput:
     def test_identical_inputs_produce_identical_sketches(self):
@@ -286,6 +291,7 @@ class TestSketchConsistencySameInput:
 # 6. Sketch inconsistency detection — different inputs → low similarity
 # ---------------------------------------------------------------------------
 
+
 class TestSketchInconsistencyDetection:
     def test_completely_different_inputs_below_threshold(self):
         """
@@ -305,7 +311,7 @@ class TestSketchInconsistencyDetection:
         Two sketchers with *different* seeds project to incompatible spaces
         and should fail consistency even on the same input.
         """
-        data = b"\xAA" * 256
+        data = b"\xaa" * 256
         s1 = ActivationSketch(seed=1).sketch(data)
         s2 = ActivationSketch(seed=2).sketch(data)
 
@@ -317,13 +323,14 @@ class TestSketchInconsistencyDetection:
 # 7. Spot-check passes for honest node
 # ---------------------------------------------------------------------------
 
+
 class TestSpotCheckHonestNode:
     def test_spot_check_passes_with_same_activations(self):
         """
         If the fresh activation sample matches what was committed, the spot
         check must pass.
         """
-        activation_bytes = b"\xDE\xAD\xBE\xEF" * 64
+        activation_bytes = b"\xde\xad\xbe\xef" * 64
         commitment, _priv, _pub = _make_commitment(activation_bytes=activation_bytes)
 
         # The "fresh" sample is the same bytes (honest node)
@@ -339,7 +346,7 @@ class TestSpotCheckHonestNode:
         Minor floating-point noise in activations (a few bits flipped) must not
         cause a false failure given the 0.95 cosine threshold.
         """
-        base = b"\x3F\x80\x00\x00" * 64  # many 1.0 floats
+        base = b"\x3f\x80\x00\x00" * 64  # many 1.0 floats
         perturbed = bytearray(base)
         perturbed[4] = 0x3F  # barely change one float
         commitment, _priv, _pub = _make_commitment(activation_bytes=base)
@@ -357,14 +364,15 @@ class TestSpotCheckHonestNode:
 # 8. Spot-check fails for dishonest node
 # ---------------------------------------------------------------------------
 
+
 class TestSpotCheckDishonestNode:
     def test_spot_check_fails_with_different_activations(self):
         """
         A dishonest node commits a fabricated sketch but cannot reproduce the
         corresponding activations on demand; the fresh sample will be different.
         """
-        real_activations = b"\x00" * 256   # what was actually computed
-        fake_activations = b"\xFF" * 256   # what the dishonest node committed
+        real_activations = b"\x00" * 256  # what was actually computed
+        fake_activations = b"\xff" * 256  # what the dishonest node committed
 
         # Node committed based on *fake* activations
         commitment, _priv, _pub = _make_commitment(activation_bytes=fake_activations)
@@ -383,12 +391,13 @@ class TestSpotCheckDishonestNode:
 # 9. aggregate_verifications reaches consensus
 # ---------------------------------------------------------------------------
 
+
 class TestAggregateVerificationsConsensus:
     def _build_commitments(
         self,
         n: int,
         output_bytes: bytes,
-        activation_bytes: bytes = b"\xAA" * 128,
+        activation_bytes: bytes = b"\xaa" * 128,
     ) -> list[ComputeCommitment]:
         commitments = []
         for i in range(n):
@@ -444,6 +453,7 @@ class TestAggregateVerificationsConsensus:
 # ---------------------------------------------------------------------------
 # 10. aggregate_verifications flags outlier nodes
 # ---------------------------------------------------------------------------
+
 
 class TestAggregateVerificationsOutliers:
     def test_minority_nodes_flagged_as_outliers(self):

@@ -18,7 +18,6 @@ from node.continuous_batcher import (
     SequenceState,
 )
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
@@ -163,8 +162,7 @@ def test_preemption_when_memory_full():
     batcher.add_request(seq_b)
 
     # First schedule admits both (4 blocks total, pool exhausted).
-    batch = batcher.schedule()
-    admitted_ids = {s.id for s in batch}
+    batcher.schedule()
     # Both should be running (pool has exactly enough for prompt blocks).
     assert seq_a.state == SequenceState.RUNNING or seq_b.state == SequenceState.RUNNING
 
@@ -173,13 +171,9 @@ def test_preemption_when_memory_full():
     batcher.add_request(seq_c)
 
     # Schedule again — seq_c needs blocks, which requires preempting someone.
-    batch2 = batcher.schedule()
+    batcher.schedule()
 
     # At least one of the original sequences was preempted.
-    preempted_states = [
-        seq_a.state == SequenceState.WAITING,
-        seq_b.state == SequenceState.WAITING,
-    ]
     # seq_b (low priority) should have been preempted.
     assert seq_b.state == SequenceState.WAITING, (
         "Lowest-priority sequence should be preempted first"
@@ -197,10 +191,7 @@ def test_fcfs_ordering():
     batcher = ContinuousBatcher(max_batch_size=2, max_tokens_per_step=16)
 
     t0 = time.monotonic()
-    seqs = [
-        make_seq(seq_id=i, arrival_time=t0 + i * 0.01)
-        for i in range(4)
-    ]
+    seqs = [make_seq(seq_id=i, arrival_time=t0 + i * 0.01) for i in range(4)]
     for s in seqs:
         batcher.add_request(s)
 
@@ -227,9 +218,7 @@ def test_batch_size_limit():
         batcher.add_request(make_seq(seq_id=i))
 
     batch = batcher.schedule()
-    assert len(batch) <= max_batch, (
-        f"Batch length {len(batch)} exceeds max_batch_size {max_batch}"
-    )
+    assert len(batch) <= max_batch, f"Batch length {len(batch)} exceeds max_batch_size {max_batch}"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -250,9 +239,7 @@ def test_max_tokens_per_step_limit():
 
     batch = batcher.schedule()
     # Each sequence generates 1 token; 5-token budget → at most 5 sequences.
-    assert len(batch) <= 5, (
-        f"Expected ≤5 sequences in batch, got {len(batch)}"
-    )
+    assert len(batch) <= 5, f"Expected ≤5 sequences in batch, got {len(batch)}"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -362,9 +349,7 @@ def test_batch_utilization():
     util = batcher.batch_utilization
     assert 0.0 <= util <= 1.0, f"utilization out of range: {util}"
     # With only 2 of 4 slots used, utilization should be ≤ 0.5
-    assert util <= 0.5 + 1e-9, (
-        f"Expected utilization ≤ 0.5 for 2/{max_batch} seqs, got {util}"
-    )
+    assert util <= 0.5 + 1e-9, f"Expected utilization ≤ 0.5 for 2/{max_batch} seqs, got {util}"
 
 
 # ──────────────────────────────────────────────────────────────────────────────

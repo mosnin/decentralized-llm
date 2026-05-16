@@ -18,8 +18,6 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Optional
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Sequence state machine
@@ -27,10 +25,10 @@ from typing import Optional
 
 
 class SequenceState(Enum):
-    WAITING = auto()     # queued, not yet scheduled
-    RUNNING = auto()     # currently in the active batch
-    FINISHED = auto()    # generation complete (EOS or max_tokens reached)
-    PREEMPTED = auto()   # was running, swapped out due to memory pressure
+    WAITING = auto()  # queued, not yet scheduled
+    RUNNING = auto()  # currently in the active batch
+    FINISHED = auto()  # generation complete (EOS or max_tokens reached)
+    PREEMPTED = auto()  # was running, swapped out due to memory pressure
 
 
 @dataclass
@@ -40,7 +38,7 @@ class Sequence:
     id: int
     prompt_tokens: list[int]
     max_tokens: int
-    priority: float = 0.0          # higher → scheduled first among ties
+    priority: float = 0.0  # higher → scheduled first among ties
     arrival_time: float = field(default_factory=time.monotonic)
     generated_tokens: list[int] = field(default_factory=list)
     state: SequenceState = SequenceState.WAITING
@@ -112,8 +110,7 @@ class BlockTable:
             return []
         if num_blocks > len(self._free_blocks):
             raise MemoryError(
-                f"Cannot allocate {num_blocks} blocks; only "
-                f"{len(self._free_blocks)} available"
+                f"Cannot allocate {num_blocks} blocks; only {len(self._free_blocks)} available"
             )
 
         allocated = []
@@ -177,6 +174,7 @@ class BlockTable:
 @dataclass
 class _ThroughputStats:
     """Rolling throughput counters."""
+
     total_tokens_generated: int = 0
     total_steps: int = 0
     step_start_times: list[float] = field(default_factory=list)
@@ -251,9 +249,7 @@ class ContinuousBatcher:
     def add_request(self, seq: Sequence) -> None:
         """Enqueue a new sequence.  Must be in WAITING state."""
         if seq.state != SequenceState.WAITING:
-            raise ValueError(
-                f"add_request expects WAITING sequence; got {seq.state}"
-            )
+            raise ValueError(f"add_request expects WAITING sequence; got {seq.state}")
         self._waiting.append(seq)
 
     def schedule(self) -> list[Sequence]:
@@ -441,7 +437,7 @@ class ContinuousBatcher:
     def _preempt_to_free(
         self,
         target_blocks: int,
-        exclude_id: Optional[int] = None,
+        exclude_id: int | None = None,
     ) -> int:
         """
         Preempt lowest-priority RUNNING sequences until *target_blocks* are freed.

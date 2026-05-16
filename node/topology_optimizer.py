@@ -145,7 +145,7 @@ class TopologyOptimizer:
         loads = [node_loads.get(n, 0.0) for n in used_nodes]
         if len(loads) > 1:
             mean_load = sum(loads) / len(loads)
-            variance = sum((l - mean_load) ** 2 for l in loads) / len(loads)
+            variance = sum((v - mean_load) ** 2 for v in loads) / len(loads)
             load_imbalance = math.sqrt(variance)
         else:
             load_imbalance = 0.0
@@ -157,9 +157,7 @@ class TopologyOptimizer:
         churn_penalty = 0.0  # placeholder — filled in optimize()
 
         return (
-            self.alpha * pipeline_latency
-            + self.beta * load_imbalance
-            + self.gamma * churn_penalty
+            self.alpha * pipeline_latency + self.beta * load_imbalance + self.gamma * churn_penalty
         )
 
     def _score_with_churn(
@@ -184,7 +182,7 @@ class TopologyOptimizer:
         loads = [node_loads.get(n, 0.0) for n in used_nodes]
         if len(loads) > 1:
             mean_load = sum(loads) / len(loads)
-            variance = sum((l - mean_load) ** 2 for l in loads) / len(loads)
+            variance = sum((v - mean_load) ** 2 for v in loads) / len(loads)
             load_imbalance = math.sqrt(variance)
         else:
             load_imbalance = 0.0
@@ -192,19 +190,13 @@ class TopologyOptimizer:
         # churn
         if current_assignment:
             cur_map = {a.shard_index: a.node_id for a in current_assignment}
-            moves = sum(
-                1
-                for a in ordered
-                if cur_map.get(a.shard_index) != a.node_id
-            )
+            moves = sum(1 for a in ordered if cur_map.get(a.shard_index) != a.node_id)
             churn_penalty = moves / self.num_shards
         else:
             churn_penalty = 0.0
 
         return (
-            self.alpha * pipeline_latency
-            + self.beta * load_imbalance
-            + self.gamma * churn_penalty
+            self.alpha * pipeline_latency + self.beta * load_imbalance + self.gamma * churn_penalty
         )
 
     # --------------------------------------------------------------- optimize
@@ -270,9 +262,7 @@ class TopologyOptimizer:
         best_score = self._score_with_churn(best, latency_matrix, node_loads, current_assignment)
 
         current = [
-            ShardAssignment(
-                shard_index=a.shard_index, node_id=a.node_id, model_id=a.model_id
-            )
+            ShardAssignment(shard_index=a.shard_index, node_id=a.node_id, model_id=a.model_id)
             for a in best
         ]
         current_score = best_score
@@ -288,9 +278,7 @@ class TopologyOptimizer:
         for _ in range(max_iterations):
             # Generate neighbour by swapping node assignments of two shards
             neighbour = [
-                ShardAssignment(
-                    shard_index=a.shard_index, node_id=a.node_id, model_id=a.model_id
-                )
+                ShardAssignment(shard_index=a.shard_index, node_id=a.node_id, model_id=a.model_id)
                 for a in current
             ]
             i, j = random.sample(range(self.num_shards), 2) if self.num_shards > 1 else (0, 0)

@@ -9,9 +9,6 @@ The test suite is runnable with:
 
 from __future__ import annotations
 
-import math
-from unittest.mock import MagicMock, patch
-
 import pytest
 
 # ---------------------------------------------------------------------------
@@ -26,7 +23,7 @@ from node.speculative_decoder import DecodeStats, DraftModel, SpeculativeDecoder
 # ---------------------------------------------------------------------------
 
 VOCAB = 32  # small vocabulary for fast tests
-SEQ = 6     # prompt length
+SEQ = 6  # prompt length
 BATCH = 1
 
 
@@ -186,7 +183,7 @@ class TestVerifyAcceptMatchingDistributions:
         assert n_acc == k, f"Expected {k} accepted, got {n_acc}"
         assert n_rej == 0, f"Expected 0 rejections, got {n_rej}"
         assert accepted.shape[1] == k + 1, (
-            f"Expected k+1={k+1} output tokens, got {accepted.shape[1]}"
+            f"Expected k+1={k + 1} output tokens, got {accepted.shape[1]}"
         )
 
     def test_accepted_tokens_match_draft_when_all_accepted(self):
@@ -219,7 +216,7 @@ class TestVerifyAcceptDivergentDistributions:
     def test_rejection_when_target_assigns_zero_prob(self):
         """If the target assigns ~0 probability to the draft token, it must be rejected."""
         draft_id = 5
-        target_id = 10   # target wants a different token
+        target_id = 10  # target wants a different token
         k = 4
 
         # Target peaked strongly at target_id ≠ draft_id
@@ -514,16 +511,14 @@ class TestBatchDimension:
             prompt, draft_tokens, verifier_logits, draft_probs=draft_probs
         )
 
-        assert accepted.shape[0] == batch, f"Expected batch dimension {batch}, got {accepted.shape[0]}"
+        assert accepted.shape[0] == batch  # noqa: E501
         assert n_acc == k  # all accepted
 
     def test_decode_loop_multi_batch(self):
         """Full decode loop returns correct batch dimension."""
         batch = 2
         draft_model = _make_draft_model(token_id=2, vocab=VOCAB)
-        verifier_logits_template = _make_peaked_logits(
-            2, batch=batch, seq=SEQ + 15, vocab=VOCAB
-        )
+        verifier_logits_template = _make_peaked_logits(2, batch=batch, seq=SEQ + 15, vocab=VOCAB)
         decoder = SpeculativeDecoder(
             draft_model=draft_model,
             verifier_fn=_constant_verifier(verifier_logits_template),
@@ -566,15 +561,6 @@ class TestTemperatureScaling:
         raw_logits = _make_peaked_logits(target_id, batch=BATCH, seq=k + 1, vocab=VOCAB)
         draft_probs = torch.zeros(BATCH, k, VOCAB)
         draft_probs[:, :, target_id] = 1.0
-        draft_tokens = torch.full((BATCH, k), target_id, dtype=torch.long)
-
-        low_temp_decoder = SpeculativeDecoder(
-            draft_model=None, verifier_fn=lambda x: x, temperature=0.01
-        )
-        high_temp_decoder = SpeculativeDecoder(
-            draft_model=None, verifier_fn=lambda x: x, temperature=10.0
-        )
-
         # At high temperature, softmax of peaked logits becomes more uniform.
         scaled_low = torch.softmax(raw_logits[:, 0, :] / 0.01, dim=-1)
         scaled_high = torch.softmax(raw_logits[:, 0, :] / 10.0, dim=-1)
@@ -582,7 +568,7 @@ class TestTemperatureScaling:
         entropy_low = -(scaled_low * (scaled_low + 1e-10).log()).sum()
         entropy_high = -(scaled_high * (scaled_high + 1e-10).log()).sum()
 
-        assert entropy_high > entropy_low, "High temperature should produce higher entropy distribution"
+        assert entropy_high > entropy_low
 
     def test_temperature_zero_point_one_accepts_correct_token(self):
         """At low temperature the decoder is near-deterministic; accepted token = target token."""
@@ -594,11 +580,12 @@ class TestTemperatureScaling:
         draft_probs[:, :, target_id] = 1.0
         draft_tokens = torch.full((BATCH, k), target_id, dtype=torch.long)
 
-        decoder = SpeculativeDecoder(
-            draft_model=None, verifier_fn=lambda x: x, temperature=0.1
-        )
+        decoder = SpeculativeDecoder(draft_model=None, verifier_fn=lambda x: x, temperature=0.1)
         accepted, n_acc, n_rej, _ = decoder.verify_and_accept(
-            _make_prompt(), draft_tokens, verifier_logits, draft_probs=draft_probs,
+            _make_prompt(),
+            draft_tokens,
+            verifier_logits,
+            draft_probs=draft_probs,
             temperature=0.1,
         )
 
@@ -639,7 +626,10 @@ class TestTemperatureScaling:
                 draft_model=None, verifier_fn=lambda x: x, temperature=temp
             )
             accepted, n_acc, n_rej, _ = decoder.verify_and_accept(
-                _make_prompt(), draft_tokens, verifier_logits, draft_probs=draft_probs,
+                _make_prompt(),
+                draft_tokens,
+                verifier_logits,
+                draft_probs=draft_probs,
                 temperature=temp,
             )
             # Draft and target agree on peaked token → should always accept regardless of temp
@@ -655,9 +645,7 @@ class TestTemperatureScaling:
         # Do NOT pass draft_probs
         draft_tokens = torch.full((BATCH, k), draft_id, dtype=torch.long)
 
-        decoder = SpeculativeDecoder(
-            draft_model=None, verifier_fn=lambda x: x, temperature=1.0
-        )
+        decoder = SpeculativeDecoder(draft_model=None, verifier_fn=lambda x: x, temperature=1.0)
         accepted, n_acc, n_rej, n_cor = decoder.verify_and_accept(
             _make_prompt(), draft_tokens, verifier_logits, draft_probs=None
         )

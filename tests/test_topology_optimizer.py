@@ -11,8 +11,6 @@ Covers:
   - 3-shard, 5-node end-to-end optimisation scenario
 """
 
-import math
-
 import pytest
 
 from node.topology_optimizer import (
@@ -21,8 +19,8 @@ from node.topology_optimizer import (
     TopologyOptimizer,
 )
 
-
 # ============================================================ NodeLatencyMatrix
+
 
 class TestNodeLatencyMatrix:
     def test_update_and_get_stored_latency(self):
@@ -82,6 +80,7 @@ class TestNodeLatencyMatrix:
 
 # ============================================================ ShardAssignment
 
+
 class TestShardAssignment:
     def test_shard_assignment_fields(self):
         sa = ShardAssignment(shard_index=2, node_id="node-7", model_id="llama-3")
@@ -97,9 +96,12 @@ class TestShardAssignment:
 
 # ============================================================ TopologyOptimizer
 
+
 def _make_assignments(mapping: dict[int, str], model_id: str = "m") -> list[ShardAssignment]:
     """Build a list of ShardAssignments from {shard_index: node_id}."""
-    return [ShardAssignment(shard_index=k, node_id=v, model_id=model_id) for k, v in mapping.items()]
+    return [
+        ShardAssignment(shard_index=k, node_id=v, model_id=model_id) for k, v in mapping.items()
+    ]
 
 
 def _latency_matrix_from_dict(pairs: dict[tuple[str, str], float]) -> NodeLatencyMatrix:
@@ -188,9 +190,7 @@ class TestOptimize:
 
         nodes = ["n0", "n1", "n2"]
         node_loads = {n: 0.0 for n in nodes}
-        result = opt.optimize(
-            nodes, lm, node_loads, current_assignment=None, max_iterations=200
-        )
+        result = opt.optimize(nodes, lm, node_loads, current_assignment=None, max_iterations=200)
         e2e = opt.estimate_e2e_latency(result, lm)
         # The best possible latency is 5 ms (n0→n1 or n1→n0)
         assert e2e <= 50.0  # optimizer should find something much better than random
@@ -265,6 +265,7 @@ class TestEstimateE2eLatency:
 
 # ============================================================ Simulated annealing
 
+
 class TestSimulatedAnnealing:
     def test_annealing_explores_worse_states_temporarily(self):
         """
@@ -296,9 +297,7 @@ class TestSimulatedAnnealing:
 
         accepted_worse_at_least_once = False
         for _ in range(200):
-            opt.optimize(
-                nodes, lm, {}, current_assignment=best_assignments, max_iterations=5
-            )
+            opt.optimize(nodes, lm, {}, current_assignment=best_assignments, max_iterations=5)
             if opt.last_exploration_stats["accepted_worse"] > 0:
                 accepted_worse_at_least_once = True
                 break
@@ -333,6 +332,7 @@ class TestSimulatedAnnealing:
 
 
 # ============================================================ Churn penalty
+
 
 class TestChurnPenalty:
     def test_churn_penalty_discourages_unnecessary_rebalancing(self):
@@ -393,6 +393,7 @@ class TestChurnPenalty:
 
 # ============================================================ 3-shard 5-node scenario
 
+
 class TestThreeShardFiveNodeScenario:
     """
     End-to-end scenario: 3 shards, 5 candidate nodes.
@@ -421,7 +422,10 @@ class TestThreeShardFiveNodeScenario:
         for a in self.nodes:
             for b in self.nodes:
                 if (a, b) not in [
-                    ("n0", "n1"), ("n1", "n2"), ("n1", "n0"), ("n2", "n1")
+                    ("n0", "n1"),
+                    ("n1", "n2"),
+                    ("n1", "n0"),
+                    ("n2", "n1"),
                 ] and a != b:
                     self.lm.update(a, b, 200.0)
 
@@ -434,7 +438,9 @@ class TestThreeShardFiveNodeScenario:
 
         opt = TopologyOptimizer(num_shards=3, alpha=1.0, beta=0.0, gamma=0.0)
         result = opt.optimize(
-            self.nodes, self.lm, self.node_loads,
+            self.nodes,
+            self.lm,
+            self.node_loads,
             current_assignment=None,
             max_iterations=500,
         )
@@ -445,7 +451,9 @@ class TestThreeShardFiveNodeScenario:
     def test_pipeline_order_length_equals_num_shards(self):
         opt = TopologyOptimizer(num_shards=3)
         result = opt.optimize(
-            self.nodes, self.lm, self.node_loads,
+            self.nodes,
+            self.lm,
+            self.node_loads,
             current_assignment=None,
             max_iterations=20,
         )

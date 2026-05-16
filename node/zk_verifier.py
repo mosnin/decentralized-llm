@@ -25,15 +25,15 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-import os
 import struct
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 # ---------------------------------------------------------------------------
 # Optional cryptography import — lazy so the module loads without it installed
 # ---------------------------------------------------------------------------
+
 
 def _try_import_ed25519() -> Any:
     """Return (Ed25519PrivateKey, Ed25519PublicKey) or None on ImportError."""
@@ -42,6 +42,7 @@ def _try_import_ed25519() -> Any:
             Ed25519PrivateKey,
             Ed25519PublicKey,
         )
+
         return Ed25519PrivateKey, Ed25519PublicKey
     except ImportError:  # pragma: no cover
         return None
@@ -50,6 +51,7 @@ def _try_import_ed25519() -> Any:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _sha256(data: bytes) -> bytes:
     return hashlib.sha256(data).digest()
@@ -73,6 +75,7 @@ def _cosine(a: list[float], b: list[float]) -> float:
 # ---------------------------------------------------------------------------
 # ComputeCommitment
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class ComputeCommitment:
@@ -103,6 +106,7 @@ class ComputeCommitment:
 # ---------------------------------------------------------------------------
 # ActivationSketch
 # ---------------------------------------------------------------------------
+
 
 class ActivationSketch:
     """
@@ -198,6 +202,7 @@ class ActivationSketch:
 # ---------------------------------------------------------------------------
 # InferenceVerifier
 # ---------------------------------------------------------------------------
+
 
 class InferenceVerifier:
     """
@@ -464,9 +469,7 @@ class InferenceVerifier:
         total = len(commitments)
         consensus_score = majority_count / total
 
-        outlier_nodes = [
-            c.node_id for c in commitments if c.output_hash != majority_hash
-        ]
+        outlier_nodes = [c.node_id for c in commitments if c.output_hash != majority_hash]
 
         is_honest = consensus_score >= (2 / 3) and total > 0
 
