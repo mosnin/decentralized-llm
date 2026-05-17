@@ -242,3 +242,14 @@ class ActivationClient:
                 await writer.wait_closed()
             except Exception:
                 pass
+
+
+# ---------------------------------------------------------------------------
+# Convenience aliases used by server.py
+# ---------------------------------------------------------------------------
+
+#: Alias: ActivationReceiver is the server-side component (listens for tensors)
+ActivationReceiver = ActivationServer
+
+#: Alias: ActivationSender is the client-side component (sends tensors)
+ActivationSender = ActivationClient

@@ -476,19 +476,55 @@ def cmd_withdraw(args: argparse.Namespace) -> None:
     config_path = _config_path_from_args(args)
     config = _load_config(config_path)
 
-    registry_program = config.get("compute_registry_program", "")
-    wallet_path = config.get("wallet_path", str(Path.home() / ".config/solana/id.json"))
+    if BlockchainClient is None or NodeConfig is None:
+        print(
+            "node.blockchain / node.config not importable. Make sure the package is installed.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
-    print("=== Withdraw Earnings ===\n")
-    print("Anchor CLI command:\n")
-    print(
-        f"    anchor invoke {registry_program} withdraw_earnings \\\n"
-        f"        --provider.wallet {wallet_path}"
-    )
-    print(
-        "\nNote: Run with --execute flag (not yet implemented) to send the transaction.\n"
-        "For now, use the Anchor CLI command above."
-    )
+    amount_lamports: int | None = getattr(args, "amount", None)
+
+    node_config = NodeConfig()
+    for key, val in config.items():
+        if hasattr(node_config, key):
+            setattr(node_config, key, val)
+
+    client = BlockchainClient(node_config)
+
+    async def _run() -> None:
+        await client.connect()
+        try:
+            if args.dry_run:
+                earnings = await client.get_earnings()
+                if amount_lamports is not None:
+                    estimated = amount_lamports
+                else:
+                    estimated = earnings["available_lamports"]
+                estimated_sol = estimated / 1_000_000_000
+                print(
+                    f"Dry run – estimated withdrawal: "
+                    f"{estimated:,} lamports ({estimated_sol:.6f} SOL)"
+                )
+                print("(Pass without --dry-run to execute the transaction.)")
+                return
+
+            from node.blockchain import InsufficientFundsError
+
+            try:
+                result = await client.withdraw_earnings(amount_lamports)
+            except InsufficientFundsError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                sys.exit(1)
+
+            print("Withdrawal successful!")
+            print(f"  Transaction : {result['tx_signature']}")
+            print(f"  Amount      : {result['amount_sol']:.6f} SOL")
+            print(f"  New balance : {result['new_balance_sol']:.6f} SOL")
+        finally:
+            await client.close()
+
+    asyncio.run(_run())
 
 
 def cmd_config_show(args: argparse.Namespace) -> None:
@@ -578,33 +614,48 @@ def cmd_governance_vote(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
 
-    governance_program = "3CvE7tX9rMwPfBgY2nKjH6oL4sQ8uZaD5mR1iW0eN9T"
-    wallet_path = config.get("wallet_path", str(Path.home() / ".config/solana/id.json"))
-    rpc_url = config.get("rpc_url", "https://api.mainnet-beta.solana.com")
+    if BlockchainClient is None or NodeConfig is None:
+        print(
+            "node.blockchain / node.config not importable. Make sure the package is installed.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
-    print("Anchor CLI command:\n")
-    print(
-        f"    anchor invoke {governance_program} cast_vote \\\n"
-        f"        --proposal-id {args.proposal_id} \\\n"
-        f"        --choice {args.choice} \\\n"
-        f"        --provider.wallet {wallet_path} \\\n"
-        f"        --provider.cluster {rpc_url}"
-    )
-    print()
+    # Map "for"/"against"/"abstain" to a bool; abstain treated as False (against)
+    # but we keep the logic simple: only True for "for", False for everything else.
+    vote_bool: bool = args.choice == "for"
 
-    if not args.execute:
-        print("(Dry run – pass --execute to cast the vote via the client SDK.)")
+    if args.dry_run:
+        vote_label = "For" if vote_bool else ("Against" if args.choice == "against" else "Abstain")
+        print(f"Dry run – would cast vote '{vote_label}' on proposal {args.proposal_id}.")
+        print("(Remove --dry-run to submit the transaction.)")
         return
 
-    from client.python import DecentralizedLLMClient
+    node_config = NodeConfig()
+    for key, val in config.items():
+        if hasattr(node_config, key):
+            setattr(node_config, key, val)
+
+    client = BlockchainClient(node_config)
 
     async def _run() -> None:
-        async with DecentralizedLLMClient(
-            wallet_path=wallet_path,
-            rpc_url=rpc_url,
-        ) as client:
-            await client.vote(args.proposal_id, args.choice)
-        print(f"Vote '{args.choice}' cast on proposal {args.proposal_id}.")
+        await client.connect()
+        try:
+            from node.blockchain import AlreadyVotedError, ProposalNotFoundError
+
+            try:
+                tx_sig = await client.cast_governance_vote(args.proposal_id, vote_bool)
+            except ProposalNotFoundError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                sys.exit(1)
+            except AlreadyVotedError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                sys.exit(1)
+
+            print(f"Vote '{args.choice}' cast on proposal {args.proposal_id}.")
+            print(f"  Transaction : {tx_sig}")
+        finally:
+            await client.close()
 
     asyncio.run(_run())
 
@@ -702,9 +753,22 @@ def build_parser() -> argparse.ArgumentParser:
     sp_withdraw = subparsers.add_parser(
         "withdraw",
         help="Withdraw earnings to wallet",
-        description="Print (or execute) the Anchor CLI command to withdraw claimable earnings.",
+        description="Withdraw claimable earnings to the node wallet via on-chain transaction.",
     )
     _add_config_path(sp_withdraw)
+    sp_withdraw.add_argument(
+        "--amount",
+        type=int,
+        default=None,
+        metavar="LAMPORTS",
+        help="Amount to withdraw in lamports (default: withdraw all available)",
+    )
+    sp_withdraw.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="Print estimated withdrawal amount without sending a transaction",
+    )
     sp_withdraw.set_defaults(func=cmd_withdraw)
 
     # ── config ─────────────────────────────────────────────────────────────
@@ -756,10 +820,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp_gov_vote = gov_sub.add_parser(
         "vote",
         help="Cast a vote on a governance proposal",
-        description=(
-            "Print the Anchor CLI command for voting. "
-            "Pass --execute to send the vote transaction via the client SDK."
-        ),
+        description="Cast a vote on an active governance proposal via on-chain transaction.",
     )
     _add_config_path(sp_gov_vote)
     sp_gov_vote.add_argument("proposal_id", type=int, help="Proposal ID (integer)")
@@ -769,10 +830,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Vote choice: for, against, or abstain",
     )
     sp_gov_vote.add_argument(
-        "--execute",
+        "--dry-run",
         action="store_true",
         default=False,
-        help="Actually cast the vote via the client SDK",
+        help="Print the intended vote without submitting a transaction",
     )
     sp_gov_vote.set_defaults(func=cmd_governance_vote)
 

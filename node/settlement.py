@@ -1,6 +1,12 @@
+from __future__ import annotations
+
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from node.verification_pipeline import InferenceProof
 
 
 class SettlementStatus(Enum):
@@ -16,6 +22,8 @@ class PaymentRecord:
     amount_lamports: int
     client_pubkey: str
     earned_at: float
+    proof: InferenceProof | None = field(default=None, repr=False)
+    """Optional verification proof attached at record time."""
 
 
 @dataclass
@@ -34,6 +42,10 @@ class SettlementBatch:
     def job_count(self) -> int:
         return len(self.records)
 
+    def proofs(self) -> list[InferenceProof]:
+        """Return all non-None proofs attached to records in this batch."""
+        return [r.proof for r in self.records if r.proof is not None]
+
 
 class SettlementTracker:
     """
@@ -49,14 +61,35 @@ class SettlementTracker:
         self._batches: dict[str, SettlementBatch] = {}
         self._batch_counter = 0
 
-    def record(self, job_id: int, amount_lamports: int, client_pubkey: str) -> None:
-        """Add a payment record to the pending queue."""
+    def record(
+        self,
+        job_id: int,
+        amount_lamports: int,
+        client_pubkey: str,
+        proof: InferenceProof | None = None,
+    ) -> None:
+        """Add a payment record to the pending queue.
+
+        Parameters
+        ----------
+        job_id:
+            On-chain job identifier.
+        amount_lamports:
+            Payment amount in lamports.
+        client_pubkey:
+            Solana public key of the paying client.
+        proof:
+            Optional ``InferenceProof`` produced during job execution.  When
+            supplied it is stored alongside the payment record so that auditors
+            can retrieve proofs from a settled batch.
+        """
         self._pending.append(
             PaymentRecord(
                 job_id=job_id,
                 amount_lamports=amount_lamports,
                 client_pubkey=client_pubkey,
                 earned_at=time.time(),
+                proof=proof,
             )
         )
 
@@ -67,7 +100,7 @@ class SettlementTracker:
         total = sum(r.amount_lamports for r in self._pending)
         return total >= self._min_batch_lamports
 
-    def flush(self) -> "SettlementBatch | None":
+    def flush(self) -> SettlementBatch | None:
         """Create a batch from pending records and clear pending. Returns None if empty."""
         if not self._pending:
             return None
@@ -105,7 +138,7 @@ class SettlementTracker:
     def pending_count(self) -> int:
         return len(self._pending)
 
-    def get_batch(self, batch_id: str) -> "SettlementBatch | None":
+    def get_batch(self, batch_id: str) -> SettlementBatch | None:
         return self._batches.get(batch_id)
 
     def batches_by_status(self, status: SettlementStatus) -> list[SettlementBatch]:

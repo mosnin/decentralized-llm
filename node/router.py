@@ -2,6 +2,8 @@ import random
 from dataclasses import dataclass
 from typing import Protocol
 
+from node.reputation_engine import get_engine
+
 
 class NodeInfo(Protocol):
     node_id: str
@@ -48,8 +50,8 @@ class InferenceRouter:
         # Must have capacity
         if node.current_load >= node.max_load:
             return False
-        # Reputation floor
-        if node.reputation < self.config.min_reputation:
+        # Reputation floor — use live engine score; fall back to node.reputation
+        if self._reputation(node) < self.config.min_reputation:
             return False
         # Cost ceiling
         if (
@@ -59,12 +61,20 @@ class InferenceRouter:
             return False
         return True
 
+    def _reputation(self, node: NodeInfo) -> float:
+        """Return live engine score if the engine has a record; else node.reputation."""
+        engine = get_engine()
+        if node.node_id in engine._records:
+            return engine.get_score(node.node_id)
+        return node.reputation
+
     def _score(self, node: NodeInfo, max_cost: int) -> float:
         load_factor = node.current_load / max(node.max_load, 1)
         norm_cost = node.cost_per_token / max(max_cost, 1)
         c = self.config
+        reputation = self._reputation(node)
         return (
-            c.reputation_weight * node.reputation
+            c.reputation_weight * reputation
             + c.availability_weight * (1.0 - load_factor)
             + c.cost_weight * (1.0 - norm_cost)
         )

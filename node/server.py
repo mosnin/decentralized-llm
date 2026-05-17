@@ -18,7 +18,9 @@ import logging
 import signal
 import time
 
+from .activation_stream import ActivationReceiver, ActivationSender
 from .blockchain import BlockchainClient, OpenJob
+from .circuit_breaker import CircuitBreaker, CircuitBreakerConfig
 from .config import NodeConfig
 from .encryption import decrypt_prompt
 from .integrity import IntegrityError, compute_model_id, verify_model_id, verify_prompt_hash
@@ -42,6 +44,14 @@ _MAX_RETRIES = 2
 _RETRY_DELAY = 5.0
 _IPFS_CIRCUIT_BREAKER_THRESHOLD = 3
 
+# Activation streaming
+_ACTIVATION_PUSH_TIMEOUT = 30.0
+_ACTIVATION_PUSH_MAX_RETRIES = 3
+
+
+class ActivationTransportError(RuntimeError):
+    """Raised when activation push fails after exhausting all retries."""
+
 
 class Node:
     def __init__(self, config: NodeConfig | None = None):
@@ -58,6 +68,13 @@ class Node:
         # Priority queue: items are (priority_key, job) where priority_key is
         # the negated payment_amount so highest-paying jobs sort first.
         self._job_queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
+        # Activation streaming receiver (TCP server on p2p_port + 1)
+        self._activation_receiver: ActivationReceiver | None = None
+        # Per-node circuit breaker for the inference pipeline
+        self._inference_cb: CircuitBreaker = CircuitBreaker(
+            config=CircuitBreakerConfig(failure_threshold=5, timeout_seconds=60.0),
+            name="inference",
+        )
 
     # ────────────────────────── lifecycle ────────────────────────────────────
 
@@ -87,6 +104,14 @@ class Node:
         self.p2p = P2PLayer(self.config, self.shard_mgr)
         await self.p2p.start()
 
+        # Start the activation receiver on listen_port + 1 so that the next
+        # shard in the pipeline can push tensors directly to us via TCP.
+        activation_port = self.config.listen_port + 1
+        listen_host = self.config.listen_host
+        self._activation_receiver = ActivationReceiver(host=listen_host, port=activation_port)
+        await self._activation_receiver.start()
+        logger.info("ActivationReceiver started on %s:%d", listen_host, activation_port)
+
         self._running = True
         logger.info(
             "Node ready. Starting job poll loop with %d workers.",
@@ -111,6 +136,9 @@ class Node:
     async def stop(self) -> None:
         logger.info("Shutting down node…")
         self._running = False
+        if self._activation_receiver is not None:
+            await self._activation_receiver.stop()
+            self._activation_receiver = None
         if self.p2p:
             await self.p2p.stop()
         await self.blockchain.close()
@@ -314,44 +342,75 @@ class Node:
         """
         Execute a pipeline-parallel inference pass.
 
-        - Shard 0: embed input → forward its layers → send to shard 1
-        - Middle shards: receive activations → forward → send to next
-        - Last shard: decode logits → sample tokens → return text
+        - Shard 0: embed input → forward its layers → push to shard 1 via TCP
+        - Middle shards: receive activations via TCP → forward → push to next
+        - Last shard: receive activations via TCP → decode logits → return text
 
         The actual prompt is retrieved off-chain (delivered encrypted to the
         claiming node via the client's P2P channel or a content-addressed store).
 
         *shard_mgr* selects the model to use; falls back to ``self.shard_mgr``
         when not provided so existing callers keep working.
+
+        The entire path is wrapped in a circuit breaker so repeated failures
+        trip the breaker and surface quickly rather than pile up.
         """
-        # In a full implementation, the client sends the encrypted prompt
-        # directly to the claiming node via a secure P2P channel keyed to
-        # the node's wallet public key. Here we show the structural skeleton.
 
-        mgr = shard_mgr if shard_mgr is not None else self.shard_mgr
-        loop = asyncio.get_event_loop()
+        async def _inner() -> str:
+            # In a full implementation, the client sends the encrypted prompt
+            # directly to the claiming node via a secure P2P channel keyed to
+            # the node's wallet public key. Here we show the structural skeleton.
 
-        if self.config.shard_index == 0:
-            prompt = await self._fetch_prompt(job)
-            input_ids = await loop.run_in_executor(None, self._tokenize_with, mgr, prompt)
-            hidden = await loop.run_in_executor(None, mgr.embed, input_ids)
-        else:
-            hidden = await self._receive_activations(job.job_id)
+            mgr = shard_mgr if shard_mgr is not None else self.shard_mgr
+            loop = asyncio.get_event_loop()
 
-        hidden = await loop.run_in_executor(None, mgr.forward, hidden)
+            if self.config.shard_index == 0:
+                prompt = await self._fetch_prompt(job)
+                input_ids = await loop.run_in_executor(None, self._tokenize_with, mgr, prompt)
+                hidden = await loop.run_in_executor(None, mgr.embed, input_ids)
+            else:
+                hidden = await self._receive_activations(job.job_id)
 
-        if self.config.shard_index < self.config.num_shards - 1:
-            # Push activations into the DHT for the next shard to pick up
-            await self._push_activations(job.job_id, hidden)
-            # Block until the final shard publishes the result to the DHT
-            return await self._await_result(job.job_id)
-        else:
-            # Last shard: generate tokens autoregressively and publish result
-            result = await loop.run_in_executor(
-                None, self._generate_with, mgr, hidden, job.max_tokens
-            )
-            await self._publish_result(job.job_id, result)
-            return result
+            hidden = await loop.run_in_executor(None, mgr.forward, hidden)
+
+            if self.config.shard_index < self.config.num_shards - 1:
+                # Resolve next peer endpoint: "host:(listen_port+1)"
+                next_peer_endpoint = await self._resolve_next_peer_endpoint(job)
+                await self._push_activations(job.job_id, hidden, next_peer_endpoint)
+                # Block until the final shard publishes the result to the DHT
+                return await self._await_result(job.job_id)
+            else:
+                # Last shard: generate tokens autoregressively and publish result
+                result = await loop.run_in_executor(
+                    None, self._generate_with, mgr, hidden, job.max_tokens
+                )
+                await self._publish_result(job.job_id, result)
+                return result
+
+        return await self._inference_cb.call(_inner)
+
+    async def _resolve_next_peer_endpoint(self, job: OpenJob) -> str:
+        """
+        Return the TCP activation endpoint of the next shard in the pipeline.
+
+        Looks up the next shard's registered P2P endpoint from the DHT, then
+        converts it to an activation-stream endpoint by incrementing the port by
+        one (activation port = p2p_port + 1).  Falls back to a localhost address
+        when the P2P layer is unavailable or the lookup fails.
+        """
+        next_idx = self.config.shard_index + 1
+        # Try to look up the registered endpoint via P2P layer
+        if self.p2p is not None:
+            peer = await self.p2p.get_next_shard_peer(next_idx)
+            if peer is not None:
+                # peer.endpoint is "host:p2p_port"; activation port = p2p_port + 1
+                host, _, port_str = peer.endpoint.rpartition(":")
+                activation_port = int(port_str) + 1
+                return f"{host}:{activation_port}"
+        # Fallback: assume next shard is on the same host, adjacent port
+        host = self.config.public_host or self.config.listen_host
+        activation_port = self.config.listen_port + 1 + next_idx
+        return f"{host}:{activation_port}"
 
     def _tokenize(self, prompt: str):
         return self._tokenize_with(self.shard_mgr, prompt)
@@ -405,60 +464,74 @@ class Node:
         wallet_seed = self.config.wallet_private_key_bytes()
         return decrypt_prompt(blob, wallet_seed, job.prompt_hash)
 
-    async def _receive_activations(self, job_id: int):
+    async def _receive_activations(self, job_id: int, timeout_s: float = 30.0):
         """
-        Receive activations streamed from the previous shard via the DHT.
+        Receive activations streamed from the previous shard via direct TCP.
 
-        Middle shards block here until shard (index-1) pushes the tensor
-        into the DHT under key "activations.<job_id>.<shard_index>".
+        Delegates to the ActivationReceiver (TCP server) already started on
+        ``listen_port + 1``.  Raises ``asyncio.TimeoutError`` if no tensor
+        arrives within *timeout_s* seconds.
         """
-        if self.p2p is None or self.p2p.dht is None:
-            raise RuntimeError("P2P layer not started")
+        if self._activation_receiver is None:
+            raise RuntimeError("ActivationReceiver not started — call Node.start() first")
 
-        import asyncio
+        try:
+            tensor = await self._activation_receiver.receive(job_id, timeout=timeout_s)
+        except TimeoutError as exc:
+            raise TimeoutError(f"Timed out waiting for activations for job {job_id}") from exc
 
-        key = f"activations.{job_id}.{self.config.shard_index}"
-        deadline = asyncio.get_event_loop().time() + 300  # 5-minute timeout
+        logger.debug("Received activations for job %d", job_id)
+        return tensor
 
-        while asyncio.get_event_loop().time() < deadline:
-            result = await asyncio.get_event_loop().run_in_executor(None, self.p2p.dht.get, key)
-            if result is not None:
-                import torch
-
-                tensor_bytes = result["tensor"]
-                shape = result["shape"]
-                dtype_str = result["dtype"]
-                dtype = getattr(torch, dtype_str)
-                return torch.frombuffer(bytearray(tensor_bytes), dtype=dtype).reshape(shape)
-            await asyncio.sleep(0.5)
-
-        raise TimeoutError(f"Timed out waiting for activations for job {job_id}")
-
-    async def _push_activations(self, job_id: int, hidden) -> None:
+    async def _push_activations(
+        self,
+        job_id: int,
+        hidden,
+        next_peer_endpoint: str,
+        timeout: float = _ACTIVATION_PUSH_TIMEOUT,
+    ) -> None:
         """
-        Push this shard's output tensor into the DHT so the next shard can read it.
-        Key: "activations.<job_id>.<next_shard_index>"
+        Send this shard's output tensor to the next shard via direct TCP.
+
+        *next_peer_endpoint* is a ``"host:port"`` string pointing at the next
+        shard's ActivationReceiver.  Retries up to
+        ``_ACTIVATION_PUSH_MAX_RETRIES`` times with exponential back-off.
+        Raises :exc:`ActivationTransportError` after exhausting retries.
         """
-        if self.p2p is None or self.p2p.dht is None:
-            raise RuntimeError("P2P layer not started")
+        host, _, port_str = next_peer_endpoint.rpartition(":")
+        port = int(port_str)
+        sender = ActivationSender(host=host, port=port)
 
-        import hivemind
+        last_exc: Exception | None = None
+        for attempt in range(_ACTIVATION_PUSH_MAX_RETRIES):
+            try:
+                await asyncio.wait_for(sender.send(job_id, hidden), timeout=timeout)
+                logger.info(
+                    "Pushed activations for job %d to %s (attempt %d)",
+                    job_id,
+                    next_peer_endpoint,
+                    attempt + 1,
+                )
+                return
+            except Exception as exc:
+                last_exc = exc
+                wait = 2.0**attempt  # 1 s, 2 s, 4 s …
+                logger.warning(
+                    "Failed to push activations for job %d to %s (attempt %d/%d): %s — "
+                    "retrying in %.1fs",
+                    job_id,
+                    next_peer_endpoint,
+                    attempt + 1,
+                    _ACTIVATION_PUSH_MAX_RETRIES,
+                    exc,
+                    wait,
+                )
+                await asyncio.sleep(wait)
 
-        next_idx = self.config.shard_index + 1
-        key = f"activations.{job_id}.{next_idx}"
-        value = {
-            "tensor": list(hidden.cpu().numpy().tobytes()),
-            "shape": list(hidden.shape),
-            "dtype": str(hidden.dtype).replace("torch.", ""),
-        }
-        await asyncio.get_event_loop().run_in_executor(
-            None,
-            self.p2p.dht.store,
-            key,
-            value,
-            hivemind.get_dht_time() + 300,  # 5-minute TTL
+        raise ActivationTransportError(
+            f"Failed to push activations for job {job_id} to {next_peer_endpoint} "
+            f"after {_ACTIVATION_PUSH_MAX_RETRIES} attempts: {last_exc}"
         )
-        logger.debug("Pushed activations for job %d → shard %d", job_id, next_idx)
 
     async def _publish_result(self, job_id: int, result_text: str) -> None:
         """Publish final result text into DHT so shard 0 can collect it."""

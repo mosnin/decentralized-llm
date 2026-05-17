@@ -105,9 +105,17 @@ class TestGovernanceDryRun:
 
         parser = cli_mod.build_parser()
         args = parser.parse_args(
-            ["governance", "vote", "--config-path", str(config_file), "42", "for"]
+            [
+                "governance",
+                "vote",
+                "--config-path",
+                str(config_file),
+                "--dry-run",
+                "42",
+                "for",
+            ]
         )
-        assert not args.execute
+        assert args.dry_run
         assert args.proposal_id == 42
         assert args.choice == "for"
 
@@ -115,11 +123,9 @@ class TestGovernanceDryRun:
 
         captured = capsys.readouterr()
         output = captured.out
-        assert "anchor invoke" in output
-        assert "cast_vote" in output
         assert "42" in output
-        assert "for" in output
-        assert "--execute" in output or "dry run" in output.lower()
+        assert "for" in output.lower()
+        assert "dry" in output.lower() or "dry-run" in output.lower()
 
 
 # ─────────────────────────── validation ────────────────────────────────────

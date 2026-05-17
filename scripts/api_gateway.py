@@ -29,6 +29,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from client.python import DecentralizedLLMClient
 from integrations.paysh import PayshHandler
+from node import token_ops
 from node.logging_config import configure_logging, set_correlation_id
 from node.metrics_collector import MetricsCollector
 from node.network_stats import NetworkStatsCollector
@@ -137,6 +138,10 @@ _metrics: dict = {
     "tokens_minted": 0,
     "started_at": time.time(),
 }
+
+# ────────────────────────── token-mint config ─────────────────────────────────
+
+MINT_ADDRESS: str = os.environ.get("TOKEN_MINT_ADDRESS", "")
 
 
 # ────────────────────────── schemas ──────────────────────────────────────────
@@ -410,6 +415,21 @@ async def paysh_webhook(request: Request):
         return {"status": "ok", "tokens_minted": event.tokens_to_mint}
     except ValueError as exc:
         raise HTTPException(status_code=401, detail=str(exc))
+    except Exception as exc:
+        from node.token_ops import TokenMintError
+
+        if isinstance(exc, TokenMintError):
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": {
+                        "message": str(exc),
+                        "type": "token_mint_error",
+                        "code": "token_mint_failed",
+                    }
+                },
+            )
+        raise
 
 
 @app.get("/health", tags=["ops"], response_model=HealthResponse)
@@ -620,20 +640,22 @@ async def _mint_tokens(wallet_address: str, amount: int) -> None:
     """
     Mint $DLLM tokens to the customer's wallet after a confirmed fiat payment.
 
-    Uses the DAO treasury mint authority (stored as TREASURY_KEYPAIR env var)
-    to call the SPL Token mint_to instruction.
+    Delegates to :func:`node.token_ops.mint_tokens` which uses the
+    ``solana`` Python package directly — no subprocess overhead.
     """
-    import base64
     import logging
+
+    from node.token_ops import TokenMintError
 
     log = logging.getLogger(__name__)
 
-    treasury_keypair_b64 = os.environ.get("TREASURY_KEYPAIR_B64", "")
-    token_mint_address = os.environ.get("DLLM_TOKEN_MINT", "")
+    wallet_keypair_path = os.environ.get("WALLET_PATH", "~/.config/solana/id.json")
+    token_mint_address = MINT_ADDRESS or os.environ.get("DLLM_TOKEN_MINT", "")
+    rpc_url = os.environ.get("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
 
-    if not treasury_keypair_b64 or not token_mint_address:
+    if not token_mint_address:
         log.warning(
-            "TREASURY_KEYPAIR_B64 or DLLM_TOKEN_MINT not set — "
+            "TOKEN_MINT_ADDRESS / DLLM_TOKEN_MINT not set — "
             "skipping on-chain mint for %d tokens to %s",
             amount,
             wallet_address,
@@ -643,31 +665,26 @@ async def _mint_tokens(wallet_address: str, amount: int) -> None:
         return
 
     try:
-        from solana.rpc.async_api import AsyncClient
-        from solders.keypair import Keypair
-        from solders.pubkey import Pubkey
-        from spl.token.async_client import AsyncToken
-        from spl.token.constants import TOKEN_PROGRAM_ID
-
-        keypair_bytes = base64.b64decode(treasury_keypair_b64)
-        treasury_kp = Keypair.from_bytes(keypair_bytes)
-
-        rpc_url = os.environ.get("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
-        async with AsyncClient(rpc_url) as rpc:
-            token = AsyncToken(
-                rpc,
-                Pubkey.from_string(token_mint_address),
-                TOKEN_PROGRAM_ID,
-                treasury_kp,
-            )
-            dest = await token.create_associated_token_account(Pubkey.from_string(wallet_address))
-            await token.mint_to(dest, treasury_kp, amount)
-
-        log.info("Minted %d $DLLM to %s", amount, wallet_address)
+        signature = await token_ops.mint_tokens(
+            rpc_url=rpc_url,
+            wallet_keypair_path=wallet_keypair_path,
+            mint_address=token_mint_address,
+            recipient_address=wallet_address,
+            amount=amount,
+        )
+        log.info("Minted %d $DLLM to %s (tx=%s)", amount, wallet_address, signature)
         _metrics["payments_processed"] += 1
         _metrics["tokens_minted"] += amount
-    except Exception as exc:
-        log.error("Token minting failed: %s", exc)
+    except TokenMintError as exc:
+        log.error(
+            "Token minting failed for wallet=%s amount=%d: %s",
+            wallet_address,
+            amount,
+            exc,
+        )
+        # _mint_tokens is always called as a background task (create_task).
+        # Re-raising here ensures the exception surfaces in the event loop's
+        # exception handler and is visible in logs / error tracking.
 
 
 def _handle_payment(event):

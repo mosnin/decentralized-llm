@@ -2,6 +2,8 @@ import time
 from dataclasses import dataclass
 from typing import Protocol
 
+from node.reputation_engine import get_engine
+
 
 class JobLike(Protocol):
     """Minimal interface a job must satisfy."""
@@ -55,7 +57,12 @@ class JobScheduler:
         return 1.0 - (remaining / self.config.urgency_horizon_s)
 
     def reputation_score(self, node_id: str) -> float:
-        """Return registered reputation or 0.5 (neutral) for unknown nodes."""
+        """Return live engine reputation; fall back to local cache or 0.5."""
+        engine_score = get_engine().get_score(node_id)
+        # If the engine has a record for this node, use it; otherwise fall
+        # back to the locally registered score (or neutral).
+        if node_id in get_engine()._records:
+            return engine_score
         return self._reputation.get(node_id, 0.5)
 
     def score(self, job, node_id: str, max_payment: int) -> float:

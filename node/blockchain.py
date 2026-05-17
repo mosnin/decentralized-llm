@@ -27,6 +27,24 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# ─────────────────────────── exceptions ────────────────────────────────────
+
+
+class BlockchainError(RuntimeError):
+    """Raised when an RPC call or on-chain instruction fails."""
+
+
+class InsufficientFundsError(BlockchainError):
+    """Raised when the requested withdrawal amount exceeds available earnings."""
+
+
+class ProposalNotFoundError(BlockchainError):
+    """Raised when the given proposal ID does not exist on-chain."""
+
+
+class AlreadyVotedError(BlockchainError):
+    """Raised when the node wallet has already cast a vote on this proposal."""
+
 
 @dataclass
 class OpenJob:
@@ -313,6 +331,256 @@ class BlockchainClient:
         except Exception as exc:
             logger.warning("Airdrop request failed: %s", exc)
             return False
+
+    # ─────────────────────────── earnings / withdraw ───────────────────────
+
+    async def get_earnings(self) -> dict:
+        """
+        Fetch the node's earnings data from the compute-registry PDA.
+
+        Returns a dict with keys:
+          - available_lamports  : claimable now (staked_amount stored in NodeRecord)
+          - total_earned_lamports : cumulative earnings derived from jobs_completed
+          - pending_lamports    : in-flight jobs not yet settled (reported as 0 here
+                                  because the on-chain record has no such field)
+        """
+        if not self._registry_program or not self._wallet:
+            raise BlockchainError("Not connected – call connect() first")
+
+        try:
+            node_pda, _ = Pubkey.find_program_address(
+                [b"node", bytes(self._wallet.public_key)],
+                self._registry_program.program_id,
+            )
+            record = await self._registry_program.account["NodeRecord"].fetch(node_pda)
+            # earnings_claimable is represented by the staked_amount available
+            # and total earned is proxied by jobs_completed (no per-job amount here)
+            available = int(record.staked_amount)
+            jobs = max(int(record.jobs_completed), 1)
+            total_earned = int(record.jobs_completed) * available // jobs
+            return {
+                "available_lamports": available,
+                "total_earned_lamports": total_earned,
+                "pending_lamports": 0,
+            }
+        except BlockchainError:
+            raise
+        except Exception as exc:
+            raise BlockchainError(f"Failed to fetch earnings: {exc}") from exc
+
+    async def withdraw_earnings(self, amount_lamports: int | None = None) -> dict:
+        """
+        Withdraw earned SOL to the node wallet via the inference-market program's
+        ``withdraw`` instruction.
+
+        Args:
+            amount_lamports: Exact amount to withdraw (in lamports).  Pass ``None``
+                to withdraw the entire available balance.
+
+        Returns:
+            {
+                "tx_signature": str,
+                "amount_sol": float,
+                "new_balance_sol": float,
+            }
+
+        Raises:
+            InsufficientFundsError: if amount_lamports exceeds the available balance.
+            BlockchainError: on any RPC / program error.
+        """
+        if not self._inference_program or not self._wallet:
+            raise BlockchainError("Not connected – call connect() first")
+
+        # Fetch current earnings to validate the requested amount
+        earnings = await self.get_earnings()
+        available = earnings["available_lamports"]
+
+        if amount_lamports is None:
+            amount_lamports = available
+
+        if amount_lamports > available:
+            raise InsufficientFundsError(
+                f"Requested {amount_lamports} lamports but only {available} available"
+            )
+
+        try:
+            node_pda, _ = Pubkey.find_program_address(
+                [b"node", bytes(self._wallet.public_key)],
+                self._inference_program.program_id,
+            )
+            tx_sig = await self._inference_program.rpc["withdraw"](
+                amount_lamports,
+                ctx=self._inference_program.context(
+                    accounts={
+                        "node": node_pda,
+                        "operator": self._wallet.public_key,
+                    }
+                ),
+            )
+        except BlockchainError:
+            raise
+        except Exception as exc:
+            raise BlockchainError(f"Withdraw instruction failed: {exc}") from exc
+
+        new_balance_sol = await self.get_wallet_balance()
+        amount_sol = amount_lamports / 1_000_000_000
+
+        logger.info(
+            "Withdrew %.6f SOL (tx: %s); new balance: %.6f SOL",
+            amount_sol,
+            tx_sig,
+            new_balance_sol,
+        )
+        return {
+            "tx_signature": str(tx_sig),
+            "amount_sol": amount_sol,
+            "new_balance_sol": new_balance_sol,
+        }
+
+    # ─────────────────────────── governance ────────────────────────────────
+
+    async def get_governance_proposals(self) -> list[dict]:
+        """
+        Fetch all Proposal PDAs from the governance program.
+
+        Returns a list of dicts with keys:
+          id, title, description, yes_votes, no_votes, status, ends_at
+        """
+        if not self._wallet:
+            raise BlockchainError("Not connected – call connect() first")
+
+        governance_program_id = getattr(
+            self.config, "governance_program", "3CvE7tX9rMwPfBgY2nKjH6oL4sQ8uZaD5mR1iW0eN9T"
+        )
+
+        try:
+            from anchorpy import Provider
+
+            provider = Provider(self._client, self._wallet)
+            gov_program = await Program.at(
+                Pubkey.from_string(governance_program_id),
+                provider,
+            )
+            proposals_raw = await gov_program.account["Proposal"].all()
+        except BlockchainError:
+            raise
+        except Exception as exc:
+            raise BlockchainError(f"Failed to fetch governance proposals: {exc}") from exc
+
+        proposals = []
+        for p in proposals_raw:
+            acc = p.account
+            proposals.append(
+                {
+                    "id": int(acc.id),
+                    "title": str(acc.title),
+                    "description": str(acc.description_cid),
+                    "yes_votes": int(acc.votes_for),
+                    "no_votes": int(acc.votes_against),
+                    "status": str(acc.status),
+                    "ends_at": int(acc.voting_ends_at),
+                }
+            )
+        proposals.sort(key=lambda x: x["id"])
+        return proposals
+
+    async def cast_governance_vote(self, proposal_id: int, vote: bool) -> str:
+        """
+        Cast a yes/no vote on a governance proposal.
+
+        Args:
+            proposal_id: Integer ID of the proposal.
+            vote: True = For, False = Against.
+
+        Returns:
+            Transaction signature string.
+
+        Raises:
+            ProposalNotFoundError: if no proposal with that ID exists.
+            AlreadyVotedError: if this wallet has already voted on the proposal.
+            BlockchainError: on any other RPC failure.
+        """
+        if not self._wallet:
+            raise BlockchainError("Not connected – call connect() first")
+
+        governance_program_id = getattr(
+            self.config, "governance_program", "3CvE7tX9rMwPfBgY2nKjH6oL4sQ8uZaD5mR1iW0eN9T"
+        )
+
+        try:
+            from anchorpy import Provider
+
+            provider = Provider(self._client, self._wallet)
+            gov_program = await Program.at(
+                Pubkey.from_string(governance_program_id),
+                provider,
+            )
+        except Exception as exc:
+            raise BlockchainError(f"Failed to load governance program: {exc}") from exc
+
+        # Derive proposal PDA and verify it exists
+        try:
+            proposal_pda, _ = Pubkey.find_program_address(
+                [b"proposal", proposal_id.to_bytes(8, "little")],
+                gov_program.program_id,
+            )
+            await gov_program.account["Proposal"].fetch(proposal_pda)
+        except BlockchainError:
+            raise
+        except Exception as exc:
+            raise ProposalNotFoundError(f"Proposal {proposal_id} not found: {exc}") from exc
+
+        # Check if the vote record already exists for this voter
+        try:
+            vote_record_pda, _ = Pubkey.find_program_address(
+                [
+                    b"vote",
+                    bytes(self._wallet.public_key),
+                    proposal_id.to_bytes(8, "little"),
+                ],
+                gov_program.program_id,
+            )
+            vote_record = await gov_program.account["VoteRecord"].fetch(vote_record_pda)
+            if vote_record.has_voted:
+                raise AlreadyVotedError(f"Already voted on proposal {proposal_id}")
+        except (ProposalNotFoundError, AlreadyVotedError):
+            raise
+        except Exception:
+            # VoteRecord doesn't exist yet – this is the first vote, proceed
+            pass
+
+        # Build the VoteChoice enum value expected by the Anchor program
+        # VoteChoice: For = 0, Against = 1, Abstain = 2 (from governance/src/lib.rs)
+        vote_choice = {"For": {}} if vote else {"Against": {}}
+
+        try:
+            tx_sig = await gov_program.rpc["cast_vote"](
+                vote_choice,
+                ctx=gov_program.context(
+                    accounts={
+                        "proposal": proposal_pda,
+                        "vote_record": vote_record_pda,
+                        "voter": self._wallet.public_key,
+                    }
+                ),
+            )
+        except BlockchainError:
+            raise
+        except AlreadyVotedError:
+            raise
+        except Exception as exc:
+            err_str = str(exc).lower()
+            if "already voted" in err_str or "alreadyvoted" in err_str:
+                raise AlreadyVotedError(f"Already voted on proposal {proposal_id}") from exc
+            raise BlockchainError(f"cast_vote instruction failed: {exc}") from exc
+
+        logger.info(
+            "Voted %s on proposal %d (tx: %s)",
+            "For" if vote else "Against",
+            proposal_id,
+            tx_sig,
+        )
+        return str(tx_sig)
 
     async def close(self) -> None:
         if self._client:
