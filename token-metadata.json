@@ -1,0 +1,21 @@
+{
+  "name": "Decentralized LLM",
+  "symbol": "DLLM",
+  "description": "Governance and utility token for the decentralized, community-owned LLM inference network. Holders earn rewards for contributing compute, vote on model deployments, and pay for inference at market rates.",
+  "image": "https://raw.githubusercontent.com/mosnin/decentralized-llm/main/assets/dllm-logo.png",
+  "external_url": "https://github.com/mosnin/decentralized-llm",
+  "attributes": [
+    { "trait_type": "Total Supply",      "value": "1,000,000,000" },
+    { "trait_type": "Decimals",          "value": "6" },
+    { "trait_type": "Token Program",     "value": "Token-2022" },
+    { "trait_type": "Transfer Fee",      "value": "0.5% → DAO treasury" },
+    { "trait_type": "Governance",        "value": "On-chain DAO (Anchor)" },
+    { "trait_type": "Compute Rewards",   "value": "40% of supply over 4 years" }
+  ],
+  "properties": {
+    "category": "utility",
+    "files": [
+      { "uri": "https://raw.githubusercontent.com/mosnin/decentralized-llm/main/assets/dllm-logo.png", "type": "image/png" }
+    ]
+  }
+}

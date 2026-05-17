@@ -1,0 +1,33 @@
+# Solana blockchain
+anchorpy>=0.20.0
+solana>=0.34.0
+solders>=0.21.0
+
+# IPFS / storage
+lighthouseweb3>=0.1.0
+
+# API gateway
+fastapi>=0.110.0
+uvicorn>=0.29.0
+pydantic>=2.0.0
+
+# ML (CPU fallback for CI; real deployments use CUDA)
+torch>=2.2.0
+transformers>=4.40.0
+accelerate>=0.28.0
+peft>=0.10.0
+bitsandbytes>=0.43.0
+
+# Networking
+aiohttp>=3.9.0
+
+# Security
+cryptography>=42.0.0
+
+# Observability
+prometheus-client>=0.20.0
+
+# Testing
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+pytest-mock>=3.12.0

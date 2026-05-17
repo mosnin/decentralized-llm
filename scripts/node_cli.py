@@ -1,0 +1,853 @@
+"""
+CLI tool for decentralized-LLM node operators.
+
+Usage:
+    python -m scripts.node_cli setup              # Generate Solana keypair and config file
+    python -m scripts.node_cli register           # Register node on-chain
+    python -m scripts.node_cli start              # Start the node server
+    python -m scripts.node_cli status             # Show node status (registration, jobs, earnings)
+    python -m scripts.node_cli earnings           # Show earnings summary
+    python -m scripts.node_cli withdraw           # Withdraw earnings to wallet
+    python -m scripts.node_cli config show        # Show current config as YAML
+    python -m scripts.node_cli governance list    # List active governance proposals
+    python -m scripts.node_cli governance vote <proposal_id> <for|against|abstain>
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import getpass
+import json
+import logging
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+import yaml
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_CONFIG_PATH = Path.home() / ".decentralized-llm" / "config.yaml"
+
+DEFAULT_CONFIG = {
+    "rpc_url": "https://api.mainnet-beta.solana.com",
+    "wallet_path": str(Path.home() / ".config" / "solana" / "id.json"),
+    "compute_registry_program": "8KpR2mT6uLqVwNzS4eBfY9oA3cJ7iGxH1nD5sW0qF2M",
+    "inference_market_program": "5YQyZqXkJHy6V3JMxKqXyLqfP9V2A3j8Rk7mN4oD1eW",
+    "listen_host": "0.0.0.0",
+    "listen_port": 7070,
+    "public_host": None,
+    "model_name": "meta-llama/Llama-3.2-3B",
+    "num_shards": 4,
+    "shard_index": 0,
+    "gpu_count": 1,
+    "vram_gb": 24,
+    "supported_models": ["meta-llama/Llama-3.2-3B"],
+    "lighthouse_api_key": "",
+    "max_concurrent_jobs": 4,
+    "job_poll_interval_seconds": 2.0,
+    "stake_amount": 0,
+}
+
+# Optional imports – kept at module scope so tests can patch them.
+try:
+    from node.blockchain import BlockchainClient
+    from node.config import NodeConfig
+except ImportError:  # pragma: no cover
+    BlockchainClient = None  # type: ignore[assignment,misc]
+    NodeConfig = None  # type: ignore[assignment,misc]
+
+
+# ─────────────────────────── helpers ───────────────────────────────────────
+
+
+def _config_path_from_args(args: argparse.Namespace) -> Path:
+    return Path(args.config_path) if args.config_path else DEFAULT_CONFIG_PATH
+
+
+def _load_config(config_path: Path) -> dict:
+    if not config_path.exists():
+        print(
+            f"Config file not found: {config_path}\nRun `python -m scripts.node_cli setup` first.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    with config_path.open() as fh:
+        return yaml.safe_load(fh) or {}
+
+
+def _write_config(config_path: Path, config: dict) -> None:
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    with config_path.open("w") as fh:
+        yaml.dump(config, fh, default_flow_style=False, sort_keys=True)
+
+
+# ─────────────────────────── subcommands ───────────────────────────────────
+
+
+def cmd_setup(args: argparse.Namespace) -> None:
+    """Create ~/.decentralized-llm/config.yaml with defaults."""
+    config_path = _config_path_from_args(args)
+
+    if config_path.exists():
+        print(f"Config already exists at {config_path}")
+        print("Delete it first if you want to re-initialise.")
+        return
+
+    print("=== Decentralized LLM Node Setup ===\n")
+
+    # Step 1: keypair instructions
+    print("Step 1 – Generate a Solana keypair (skip if you already have one):\n")
+    print("    solana-keygen new --outfile ~/.config/solana/id.json\n")
+    print(
+        "    This creates your node identity. Keep the seed phrase safe!\n"
+        "    The public key printed by solana-keygen is your node's on-chain identity.\n"
+    )
+
+    # Step 2: Lighthouse API key
+    print("Step 2 – Lighthouse API key (for IPFS/Filecoin result storage):")
+    print("    Get your key at https://files.lighthouse.storage/\n")
+    try:
+        lighthouse_key = getpass.getpass(
+            "    Enter LIGHTHOUSE_API_KEY (hidden, press Enter to skip): "
+        )
+    except (EOFError, KeyboardInterrupt):
+        lighthouse_key = ""
+
+    # Step 3: write config
+    config = dict(DEFAULT_CONFIG)
+    config["lighthouse_api_key"] = lighthouse_key.strip()
+
+    _write_config(config_path, config)
+
+    print(f"\nConfig written to {config_path}")
+    print("Edit it to set your wallet_path, rpc_url, model_name, etc.")
+    print("\nNext step: python -m scripts.node_cli register")
+
+
+def cmd_register(args: argparse.Namespace) -> None:
+    """Register this node in the on-chain compute-registry."""
+    config_path = _config_path_from_args(args)
+    config = _load_config(config_path)
+
+    endpoint = (
+        f"{config.get('public_host') or config.get('listen_host', '0.0.0.0')}"
+        f":{config.get('listen_port', 7070)}"
+    )
+    gpu_count = config.get("gpu_count", 1)
+    vram_gb = config.get("vram_gb", 24)
+    models = config.get("supported_models", [config.get("model_name", "")])
+    stake_amount = config.get("stake_amount", 0)
+    registry_program = config.get("compute_registry_program", "")
+    wallet_path = config.get("wallet_path", "~/.config/solana/id.json")
+
+    print("=== Node Registration Parameters ===\n")
+    print(f"  Endpoint      : {endpoint}")
+    print(f"  GPU count     : {gpu_count}")
+    print(f"  VRAM (GB)     : {vram_gb}")
+    print(f"  Models        : {', '.join(models)}")
+    print(f"  Stake amount  : {stake_amount}")
+    print(f"  Registry prog : {registry_program}")
+    print()
+
+    model_args = " ".join(f'"{m}"' for m in models)
+    print("Anchor CLI command (dry-run preview):\n")
+    print(
+        f"    anchor invoke {registry_program} register_node \\\n"
+        f'        --endpoint "{endpoint}" \\\n'
+        f"        --vram-gb {vram_gb} \\\n"
+        f"        --gpu-count {gpu_count} \\\n"
+        f"        --model-ids {model_args} \\\n"
+        f"        --stake-amount {stake_amount} \\\n"
+        f"        --provider.wallet {wallet_path}"
+    )
+    print()
+
+    if not args.execute:
+        print("(Dry run – pass --execute to actually send the transaction.)")
+        return
+
+    # Live execution path
+    import hashlib
+
+    if BlockchainClient is None or NodeConfig is None:
+        print(
+            "node.blockchain / node.config not importable. Make sure the package is installed.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    node_config = NodeConfig()
+    for key, val in config.items():
+        if hasattr(node_config, key):
+            setattr(node_config, key, val)
+
+    client = BlockchainClient(node_config)
+
+    async def _run() -> None:
+        await client.connect()
+        model_ids = [hashlib.sha256(m.encode()).digest() for m in models]
+        success = await client.register_node(
+            endpoint=endpoint,
+            vram_gb=vram_gb,
+            gpu_count=gpu_count,
+            model_ids=model_ids,
+            stake_amount=stake_amount,
+        )
+        await client.close()
+        if success:
+            print("Node registered successfully.")
+        else:
+            print("Registration failed (already registered, or check logs).", file=sys.stderr)
+            sys.exit(1)
+
+    asyncio.run(_run())
+
+
+def cmd_start(args: argparse.Namespace) -> None:
+    """Start the node server."""
+    import signal
+
+    config_path = _config_path_from_args(args)
+    config = _load_config(config_path)
+
+    if NodeConfig is None:  # pragma: no cover
+        print("node.config not importable.", file=sys.stderr)
+        sys.exit(1)
+
+    from node.server import Node
+
+    node_config = NodeConfig()
+    for key, val in config.items():
+        if hasattr(node_config, key):
+            setattr(node_config, key, val)
+
+    node = Node(node_config)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, lambda: asyncio.create_task(node.stop()))
+
+    try:
+        loop.run_until_complete(node.start())
+    finally:
+        loop.close()
+
+
+def cmd_status(args: argparse.Namespace) -> None:
+    """Fetch and print this node's on-chain status."""
+    config_path = _config_path_from_args(args)
+    config = _load_config(config_path)
+
+    rpc_url = config.get("rpc_url", "https://api.mainnet-beta.solana.com")
+    wallet_path = config.get("wallet_path", str(Path.home() / ".config/solana/id.json"))
+    registry_program = config.get("compute_registry_program", "")
+
+    print(f"Connecting to RPC: {rpc_url}")
+    print(f"Wallet           : {wallet_path}")
+    print(f"Registry program : {registry_program}\n")
+
+    try:
+        from solana.rpc.async_api import AsyncClient
+        from solders.keypair import Keypair
+        from solders.pubkey import Pubkey
+
+        solana_available = True
+    except ImportError:
+        solana_available = False
+
+    if not solana_available:
+        print(
+            "Solana packages not installed. Install with:\n"
+            "  pip install anchorpy solders solana\n\n"
+            "Showing config-derived status only:\n",
+            file=sys.stderr,
+        )
+        endpoint = (
+            f"{config.get('public_host') or config.get('listen_host', '0.0.0.0')}"
+            f":{config.get('listen_port', 7070)}"
+        )
+        _print_status(
+            endpoint=endpoint,
+            stake=config.get("stake_amount", 0),
+            reputation=None,
+            jobs_completed=None,
+            jobs_disputed=None,
+            earnings_claimable=None,
+        )
+        return
+
+    async def _run() -> None:
+        kp_json = Path(wallet_path).read_text()
+        keypair = Keypair.from_json(kp_json)
+        pubkey = keypair.pubkey()
+        print(f"Node pubkey      : {pubkey}\n")
+
+        async with AsyncClient(rpc_url) as client:
+            # PDA seed: ["node", operator_pubkey]
+            node_pda, _ = Pubkey.find_program_address(
+                [b"node", bytes(pubkey)],
+                Pubkey.from_string(registry_program),
+            )
+
+            try:
+                resp = await client.get_account_info(node_pda)
+                account_data = resp.value
+            except Exception as exc:
+                print(f"RPC call failed: {exc}", file=sys.stderr)
+                account_data = None
+
+        if account_data is None or account_data.data is None:
+            print("Node is NOT registered on-chain (no account found at PDA).")
+            return
+
+        raw = bytes(account_data.data)
+        try:
+            from anchorpy import Program, Provider, Wallet
+            from anchorpy.provider import DEFAULT_OPTIONS
+
+            kp_json_reload = Path(wallet_path).read_text()
+            kp_reload = Keypair.from_json(kp_json_reload)
+            wallet = Wallet(kp_reload)
+            async with AsyncClient(rpc_url) as rpc:
+                provider = Provider(rpc, wallet, DEFAULT_OPTIONS)
+                program = await Program.at(Pubkey.from_string(registry_program), provider)
+                record = await program.account["NodeInfo"].fetch(node_pda)
+                _print_status(
+                    endpoint=str(record.endpoint),
+                    stake=int(record.stake),
+                    reputation=int(record.reputation),
+                    jobs_completed=int(record.jobs_completed),
+                    jobs_disputed=int(record.jobs_disputed),
+                    earnings_claimable=int(record.earnings_claimable),
+                )
+        except Exception as exc:
+            print(f"Could not decode account (anchorpy error: {exc}).")
+            print(f"Raw data (hex): {raw[:64].hex()}…")
+
+    asyncio.run(_run())
+
+
+def _print_status(
+    endpoint: str,
+    stake,
+    reputation,
+    jobs_completed,
+    jobs_disputed,
+    earnings_claimable,
+) -> None:
+    def _fmt(val) -> str:
+        return str(val) if val is not None else "N/A"
+
+    print("─" * 40)
+    print("Node Status")
+    print("─" * 40)
+    print(f"  endpoint           : {endpoint}")
+    print(f"  stake              : {_fmt(stake)}")
+    print(f"  reputation         : {_fmt(reputation)}")
+    print(f"  jobs_completed     : {_fmt(jobs_completed)}")
+    print(f"  jobs_disputed      : {_fmt(jobs_disputed)}")
+    print(f"  earnings_claimable : {_fmt(earnings_claimable)}")
+    print("─" * 40)
+
+
+# ─────────────────────────── gateway helpers ───────────────────────────────
+
+
+def _fetch_dashboard(gateway_url: str) -> dict | None:
+    """Fetch dashboard data from the gateway API.  Returns None if unavailable."""
+    url = gateway_url.rstrip("/") + "/v1/dashboard"
+    try:
+        with urllib.request.urlopen(url, timeout=3) as resp:
+            return json.loads(resp.read())
+    except Exception:
+        return None
+
+
+def _fmt_uptime(seconds: float) -> str:
+    secs = int(seconds)
+    h = secs // 3600
+    m = (secs % 3600) // 60
+    s = secs % 60
+    return f"{h}h {m:02d}m {s:02d}s"
+
+
+def _fmt_lamports(lamports: int) -> str:
+    sol = lamports / 1_000_000_000
+    return f"{lamports:,} lamports ({sol:.6f} SOL)"
+
+
+def cmd_node_status(args: argparse.Namespace) -> None:
+    """Print node operational status (live data from gateway or N/A)."""
+    config_path = _config_path_from_args(args)
+    config = _load_config(config_path)
+
+    gateway = config.get("gateway_url", "http://localhost:8080")
+    data = _fetch_dashboard(gateway)
+
+    node_id = config.get("node_id") or config.get("compute_registry_program", "N/A")
+
+    if data:
+        uptime = _fmt_uptime(data.get("uptime_seconds", 0))
+        version = data.get("version", "N/A")
+        blockchain_status = data.get("health", {}).get("blockchain", "N/A")
+        rpc_status = "connected" if blockchain_status == "ok" else "disconnected"
+        jobs_today = data.get("network", {}).get("jobs_24h", "N/A")
+        queue_depth = data.get("inference", {}).get("queue_depth", "N/A")
+        node_status = "running"
+    else:
+        uptime = "N/A"
+        version = "0.1.0"
+        rpc_status = "disconnected"
+        jobs_today = "N/A"
+        queue_depth = "N/A"
+        node_status = "stopped"
+
+    label_w = 12
+    print("Node Status")
+    print("===========")
+    print(f"{'Node ID:':<{label_w}} {node_id}")
+    print(f"{'Status:':<{label_w}} {node_status}")
+    print(f"{'Uptime:':<{label_w}} {uptime}")
+    print(f"{'Version:':<{label_w}} {version}")
+    print(f"{'RPC:':<{label_w}} {rpc_status}")
+    print(f"{'Jobs Today:':<{label_w}} {jobs_today}")
+    print(f"{'Queue Depth:':<{label_w}} {queue_depth}")
+
+
+def cmd_node_earnings(args: argparse.Namespace) -> None:
+    """Print earnings summary (live data from gateway or N/A)."""
+    config_path = _config_path_from_args(args)
+    config = _load_config(config_path)
+    hours = args.hours
+
+    gateway = config.get("gateway_url", "http://localhost:8080")
+    data = _fetch_dashboard(gateway)
+
+    label_w = 17
+
+    if data:
+        inf = data.get("inference", {})
+        net = data.get("network", {})
+        jobs_completed = inf.get("total_requests", "N/A")
+        total_stake = net.get("total_stake_lamports", 0)
+        if isinstance(jobs_completed, int) and isinstance(total_stake, (int, float)):
+            total_earned = int(total_stake)
+            avg_per_job = total_earned // jobs_completed if jobs_completed else 0
+            total_earned_fmt = _fmt_lamports(total_earned)
+            avg_per_job_fmt = f"{avg_per_job:,} lamports"
+        else:
+            total_earned_fmt = "N/A"
+            avg_per_job_fmt = "N/A"
+        top_model = config.get("model_name", "N/A")
+        top_model_jobs = jobs_completed if isinstance(jobs_completed, int) else "N/A"
+        top_model_str = (
+            f"{top_model} ({top_model_jobs} jobs)" if isinstance(top_model_jobs, int) else top_model
+        )
+        lifetime_jobs = jobs_completed
+        lifetime_earned = total_earned_fmt
+    else:
+        jobs_completed = "N/A"
+        total_earned_fmt = "N/A"
+        avg_per_job_fmt = "N/A"
+        top_model_str = "N/A"
+        lifetime_jobs = "N/A"
+        lifetime_earned = "N/A"
+
+    heading = f"Earnings Summary (last {hours}h)"
+    print(heading)
+    print("=" * len(heading))
+    print(f"{'Jobs Completed:':<{label_w}} {jobs_completed}")
+    print(f"{'Total Earned:':<{label_w}} {total_earned_fmt}")
+    print(f"{'Avg per Job:':<{label_w}} {avg_per_job_fmt}")
+    print(f"{'Top Model:':<{label_w}} {top_model_str}")
+    print()
+    print("Lifetime Totals")
+    print("===============")
+    print(f"{'Total Jobs:':<{label_w}} {lifetime_jobs}")
+    print(f"{'Total Earned:':<{label_w}} {lifetime_earned}")
+
+
+def cmd_withdraw(args: argparse.Namespace) -> None:
+    """Withdraw claimable earnings to the node wallet."""
+    config_path = _config_path_from_args(args)
+    config = _load_config(config_path)
+
+    if BlockchainClient is None or NodeConfig is None:
+        print(
+            "node.blockchain / node.config not importable. Make sure the package is installed.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    amount_lamports: int | None = getattr(args, "amount", None)
+
+    node_config = NodeConfig()
+    for key, val in config.items():
+        if hasattr(node_config, key):
+            setattr(node_config, key, val)
+
+    client = BlockchainClient(node_config)
+
+    async def _run() -> None:
+        await client.connect()
+        try:
+            if args.dry_run:
+                earnings = await client.get_earnings()
+                if amount_lamports is not None:
+                    estimated = amount_lamports
+                else:
+                    estimated = earnings["available_lamports"]
+                estimated_sol = estimated / 1_000_000_000
+                print(
+                    f"Dry run – estimated withdrawal: "
+                    f"{estimated:,} lamports ({estimated_sol:.6f} SOL)"
+                )
+                print("(Pass without --dry-run to execute the transaction.)")
+                return
+
+            from node.blockchain import InsufficientFundsError
+
+            try:
+                result = await client.withdraw_earnings(amount_lamports)
+            except InsufficientFundsError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                sys.exit(1)
+
+            print("Withdrawal successful!")
+            print(f"  Transaction : {result['tx_signature']}")
+            print(f"  Amount      : {result['amount_sol']:.6f} SOL")
+            print(f"  New balance : {result['new_balance_sol']:.6f} SOL")
+        finally:
+            await client.close()
+
+    asyncio.run(_run())
+
+
+def cmd_config_show(args: argparse.Namespace) -> None:
+    """Print current config as YAML."""
+    config_path = _config_path_from_args(args)
+    config = _load_config(config_path)
+    display = dict(config)
+    for key in ("lighthouse_api_key", "paysh_api_key", "paysh_webhook_secret"):
+        if display.get(key):
+            display[key] = "***REDACTED***"
+    print(f"# Config: {config_path}\n")
+    print(yaml.dump(display, default_flow_style=False, sort_keys=True), end="")
+
+
+# ─────────────────────────── governance subcommands ────────────────────────
+
+
+def cmd_governance_list(args: argparse.Namespace) -> None:
+    """List active governance proposals."""
+    config_path = _config_path_from_args(args)
+    config = _load_config(config_path)
+
+    governance_program = "3CvE7tX9rMwPfBgY2nKjH6oL4sQ8uZaD5mR1iW0eN9T"
+    wallet_path = config.get("wallet_path", str(Path.home() / ".config/solana/id.json"))
+    rpc_url = config.get("rpc_url", "https://api.mainnet-beta.solana.com")
+
+    print("Anchor CLI command:\n")
+    print(
+        f"    anchor invoke {governance_program} get_proposals \\\n"
+        f"        --provider.wallet {wallet_path} \\\n"
+        f"        --provider.cluster {rpc_url}"
+    )
+    print()
+
+    if not args.execute:
+        print("(Dry run – pass --execute to fetch proposals via the client SDK.)")
+        return
+
+    from client.python import DecentralizedLLMClient
+
+    async def _run() -> None:
+        async with DecentralizedLLMClient(
+            wallet_path=wallet_path,
+            rpc_url=rpc_url,
+        ) as client:
+            proposals = await client.get_governance_proposals()
+
+        if not proposals:
+            print("No active proposals found.")
+            return
+
+        col_w = [6, 40, 12, 12, 12, 20]
+        header = (
+            f"{'ID':<{col_w[0]}}  "
+            f"{'Title':<{col_w[1]}}  "
+            f"{'Status':<{col_w[2]}}  "
+            f"{'For':>{col_w[3]}}  "
+            f"{'Against':>{col_w[4]}}  "
+            f"{'Ends':<{col_w[5]}}"
+        )
+        sep = "  ".join("─" * w for w in col_w)
+        print(header)
+        print(sep)
+        for p in proposals:
+            print(
+                f"{str(p['id']):<{col_w[0]}}  "
+                f"{str(p['title']):<{col_w[1]}}  "
+                f"{str(p['status']):<{col_w[2]}}  "
+                f"{str(p['votes_for']):>{col_w[3]}}  "
+                f"{str(p['votes_against']):>{col_w[4]}}  "
+                f"{str(p['voting_ends_at']):<{col_w[5]}}"
+            )
+
+    asyncio.run(_run())
+
+
+def cmd_governance_vote(args: argparse.Namespace) -> None:
+    """Cast a vote on a governance proposal."""
+    config_path = _config_path_from_args(args)
+    config = _load_config(config_path)
+
+    valid_choices = {"for", "against", "abstain"}
+    if args.choice not in valid_choices:
+        print(
+            f"Error: choice must be one of {sorted(valid_choices)}, got '{args.choice}'",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if BlockchainClient is None or NodeConfig is None:
+        print(
+            "node.blockchain / node.config not importable. Make sure the package is installed.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Map "for"/"against"/"abstain" to a bool; abstain treated as False (against)
+    # but we keep the logic simple: only True for "for", False for everything else.
+    vote_bool: bool = args.choice == "for"
+
+    if args.dry_run:
+        vote_label = "For" if vote_bool else ("Against" if args.choice == "against" else "Abstain")
+        print(f"Dry run – would cast vote '{vote_label}' on proposal {args.proposal_id}.")
+        print("(Remove --dry-run to submit the transaction.)")
+        return
+
+    node_config = NodeConfig()
+    for key, val in config.items():
+        if hasattr(node_config, key):
+            setattr(node_config, key, val)
+
+    client = BlockchainClient(node_config)
+
+    async def _run() -> None:
+        await client.connect()
+        try:
+            from node.blockchain import AlreadyVotedError, ProposalNotFoundError
+
+            try:
+                tx_sig = await client.cast_governance_vote(args.proposal_id, vote_bool)
+            except ProposalNotFoundError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                sys.exit(1)
+            except AlreadyVotedError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                sys.exit(1)
+
+            print(f"Vote '{args.choice}' cast on proposal {args.proposal_id}.")
+            print(f"  Transaction : {tx_sig}")
+        finally:
+            await client.close()
+
+    asyncio.run(_run())
+
+
+# ─────────────────────────── argument parser ───────────────────────────────
+
+_CONFIG_PATH_HELP = f"Path to config YAML (default: {DEFAULT_CONFIG_PATH})"
+
+
+def _add_config_path(p: argparse.ArgumentParser) -> None:
+    """Add --config-path to a (sub)parser."""
+    p.add_argument("--config-path", metavar="PATH", default=None, help=_CONFIG_PATH_HELP)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="node_cli",
+        description="Decentralized LLM node operator CLI",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+
+    subparsers = parser.add_subparsers(dest="subcommand", metavar="SUBCOMMAND")
+    subparsers.required = True
+
+    # ── setup ──────────────────────────────────────────────────────────────
+    sp_setup = subparsers.add_parser(
+        "setup",
+        help="Generate Solana keypair instructions and create config file",
+        description="Initialise the node configuration at ~/.decentralized-llm/config.yaml.",
+    )
+    _add_config_path(sp_setup)
+    sp_setup.set_defaults(func=cmd_setup)
+
+    # ── register ───────────────────────────────────────────────────────────
+    sp_reg = subparsers.add_parser(
+        "register",
+        help="Register this node in the on-chain compute-registry",
+        description=(
+            "Prints the Anchor CLI command for on-chain registration. "
+            "Pass --execute to send the transaction directly."
+        ),
+    )
+    _add_config_path(sp_reg)
+    sp_reg.add_argument(
+        "--execute",
+        action="store_true",
+        default=False,
+        help="Actually send the registration transaction (requires Solana packages)",
+    )
+    sp_reg.set_defaults(func=cmd_register)
+
+    # ── start ──────────────────────────────────────────────────────────────
+    sp_start = subparsers.add_parser(
+        "start",
+        help="Start the node server",
+        description="Load config, create a Node instance, and run the job-processing loop.",
+    )
+    _add_config_path(sp_start)
+    sp_start.set_defaults(func=cmd_start)
+
+    # ── status ─────────────────────────────────────────────────────────────
+    sp_status = subparsers.add_parser(
+        "status",
+        help="Show node operational status (uptime, jobs, RPC health)",
+        description=(
+            "Fetch live operational metrics from the gateway API "
+            "(http://localhost:8080/v1/dashboard) and display node status. "
+            "Shows N/A values when the gateway is unavailable."
+        ),
+    )
+    _add_config_path(sp_status)
+    sp_status.set_defaults(func=cmd_node_status)
+
+    # ── earnings ───────────────────────────────────────────────────────────
+    sp_earnings = subparsers.add_parser(
+        "earnings",
+        help="Show earnings summary",
+        description=(
+            "Fetch live earnings data from the gateway API and display a "
+            "summary for the specified time window and lifetime totals."
+        ),
+    )
+    _add_config_path(sp_earnings)
+    sp_earnings.add_argument(
+        "--hours",
+        type=int,
+        default=24,
+        metavar="HOURS",
+        help="Time window in hours (default: 24)",
+    )
+    sp_earnings.set_defaults(func=cmd_node_earnings)
+
+    # ── withdraw ───────────────────────────────────────────────────────────
+    sp_withdraw = subparsers.add_parser(
+        "withdraw",
+        help="Withdraw earnings to wallet",
+        description="Withdraw claimable earnings to the node wallet via on-chain transaction.",
+    )
+    _add_config_path(sp_withdraw)
+    sp_withdraw.add_argument(
+        "--amount",
+        type=int,
+        default=None,
+        metavar="LAMPORTS",
+        help="Amount to withdraw in lamports (default: withdraw all available)",
+    )
+    sp_withdraw.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="Print estimated withdrawal amount without sending a transaction",
+    )
+    sp_withdraw.set_defaults(func=cmd_withdraw)
+
+    # ── config ─────────────────────────────────────────────────────────────
+    sp_config = subparsers.add_parser(
+        "config",
+        help="Show or edit config",
+        description="Show or edit the node configuration.",
+    )
+    _add_config_path(sp_config)
+    config_sub = sp_config.add_subparsers(dest="config_action", metavar="ACTION")
+    config_sub.required = True
+
+    sp_config_show = config_sub.add_parser(
+        "show",
+        help="Print current config as YAML",
+    )
+    _add_config_path(sp_config_show)
+    sp_config_show.set_defaults(func=cmd_config_show)
+
+    # ── governance ─────────────────────────────────────────────────────────
+    sp_gov = subparsers.add_parser(
+        "governance",
+        help="Participate in DAO governance",
+        description="List proposals and cast votes in the decentralized governance system.",
+    )
+    _add_config_path(sp_gov)
+    gov_sub = sp_gov.add_subparsers(dest="governance_action", metavar="ACTION")
+    gov_sub.required = True
+
+    # governance list
+    sp_gov_list = gov_sub.add_parser(
+        "list",
+        help="List active governance proposals",
+        description=(
+            "Print the Anchor CLI command for fetching proposals. "
+            "Pass --execute to fetch and display them as a table."
+        ),
+    )
+    _add_config_path(sp_gov_list)
+    sp_gov_list.add_argument(
+        "--execute",
+        action="store_true",
+        default=False,
+        help="Actually fetch proposals via the client SDK",
+    )
+    sp_gov_list.set_defaults(func=cmd_governance_list)
+
+    # governance vote
+    sp_gov_vote = gov_sub.add_parser(
+        "vote",
+        help="Cast a vote on a governance proposal",
+        description="Cast a vote on an active governance proposal via on-chain transaction.",
+    )
+    _add_config_path(sp_gov_vote)
+    sp_gov_vote.add_argument("proposal_id", type=int, help="Proposal ID (integer)")
+    sp_gov_vote.add_argument(
+        "choice",
+        type=str,
+        help="Vote choice: for, against, or abstain",
+    )
+    sp_gov_vote.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="Print the intended vote without submitting a transaction",
+    )
+    sp_gov_vote.set_defaults(func=cmd_governance_vote)
+
+    return parser
+
+
+# ─────────────────────────── entrypoint ────────────────────────────────────
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

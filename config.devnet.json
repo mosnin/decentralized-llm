@@ -1,0 +1,13 @@
+{
+  "model_name": "meta-llama/Llama-3.2-3B",
+  "wallet_path": "~/.config/solana/id.json",
+  "rpc_url": "https://api.devnet.solana.com",
+  "inference_market_program": "5YQyZqXkJHy6V3JMxKqXyLqfP9V2A3j8Rk7mN4oD1eW",
+  "compute_registry_program": "8KpR2mT6uLqVwNzS4eBfY9oA3cJ7iGxH1nD5sW0qF2M",
+  "governance_program": "3CvE7tX9rMwPfBgY2nKjH6oL4sQ8uZaD5mR1iW0eN9T",
+  "gateway_port": 8080,
+  "p2p_port": 7070,
+  "max_concurrent_jobs": 2,
+  "ipfs_gateway": "https://gateway.lighthouse.storage",
+  "lighthouse_api_key": "YOUR_LIGHTHOUSE_API_KEY"
+}

@@ -1,0 +1,84 @@
+# Build argument for CUDA version — override at build time:
+#   docker build --build-arg CUDA_VERSION=12.2.0 -f docker/Dockerfile.node .
+ARG CUDA_VERSION=12.4.0
+
+# ── Stage 1: builder ──────────────────────────────────────────────────────────
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn-runtime-ubuntu22.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 python3.11-dev python3-pip git curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN ln -sf /usr/bin/python3.11 /usr/local/bin/python3 && \
+    ln -sf /usr/bin/python3.11 /usr/local/bin/python
+
+WORKDIR /app
+
+# Install production Python deps (no dev/test extras) — layer-cached until
+# pyproject.toml changes.
+COPY pyproject.toml .
+RUN pip3 install --no-cache-dir \
+    "torch>=2.2.0" --index-url https://download.pytorch.org/whl/cu124 && \
+    pip3 install --no-cache-dir \
+    "transformers>=4.40.0" \
+    "accelerate>=0.30.0" \
+    "peft>=0.10.0" \
+    "bitsandbytes>=0.43.0" \
+    "hivemind>=1.1.0" \
+    "anchorpy>=0.20.0" \
+    "solders>=0.21.0" \
+    "solana>=0.34.0" \
+    "cryptography>=41.0" \
+    "lighthouseweb3>=0.1.5" \
+    "aiohttp>=3.9.0" \
+    "pyyaml>=6.0"
+
+# ── Stage 2: runtime ──────────────────────────────────────────────────────────
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn-runtime-ubuntu22.04 AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 python3-pip curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN ln -sf /usr/bin/python3.11 /usr/local/bin/python3 && \
+    ln -sf /usr/bin/python3.11 /usr/local/bin/python
+
+# Copy installed packages from builder
+COPY --from=builder /usr/local/lib/python3.11 /usr/local/lib/python3.11
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+WORKDIR /app
+
+# Copy only production source — exclude tests/, docs/
+COPY node/ ./node/
+COPY scripts/ ./scripts/
+COPY integrations/ ./integrations/
+COPY finetuning/ ./finetuning/
+
+# Default env — override via docker run -e or docker-compose environment:
+ENV LISTEN_HOST=0.0.0.0 \
+    LISTEN_PORT=7070 \
+    MODEL_NAME=meta-llama/Llama-3.2-3B \
+    NUM_SHARDS=1 \
+    SHARD_INDEX=0 \
+    MODEL_DTYPE=float16 \
+    MAX_CONCURRENT_JOBS=4
+
+# Vast.ai / RunPod map external port via $VAST_TCP_PORT_7070 at runtime
+EXPOSE 7070
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:7070/health || exit 1
+
+COPY docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]

@@ -1,0 +1,38 @@
+# Rust / Anchor
+target/
+.anchor/
+**/*.rs.bk
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Env
+.env
+.env.local
+
+# Model cache
+.cache/
+
+# Solana
+test-ledger/
+
+# Docker
+*.tar
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Secrets (belt-and-suspenders — never commit these)
+id.json
+*.pem
+*.key
