@@ -356,10 +356,16 @@ class TestBlockchainFallback:
 
     def test_blockchain_client_raises_without_solana(self) -> None:
         """BlockchainClient.__init__ must raise RuntimeError when SOLANA_AVAILABLE is False."""
+        import node.blockchain as _bc
         from node.blockchain import BlockchainClient
 
-        with pytest.raises(RuntimeError, match="Solana packages not installed"):
-            BlockchainClient(config=MagicMock())
+        original = _bc.SOLANA_AVAILABLE
+        try:
+            _bc.SOLANA_AVAILABLE = False
+            with pytest.raises(RuntimeError, match="Solana packages not installed"):
+                BlockchainClient(config=MagicMock())
+        finally:
+            _bc.SOLANA_AVAILABLE = original
 
     def test_open_job_dataclass_fields(self) -> None:
         """OpenJob must be constructible from keyword args and expose all fields."""

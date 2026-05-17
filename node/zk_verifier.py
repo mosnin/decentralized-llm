@@ -149,15 +149,10 @@ class ActivationSketch:
         return results
 
     def _bytes_to_floats(self, data: bytes) -> list[float]:
-        """Interpret *data* as little-endian float32 values, padding if needed."""
-        # Pad to multiple of 4 bytes
-        remainder = len(data) % 4
-        if remainder:
-            data = data + b"\x00" * (4 - remainder)
-        n = len(data) // 4
-        if n == 0:
+        """Map each byte (0–255) to a float in [-1, 1], avoiding NaN/inf entirely."""
+        if not data:
             return [0.0]
-        return list(struct.unpack_from(f"<{n}f", data))
+        return [(b - 127.5) / 127.5 for b in data]
 
     # ------------------------------------------------------------------
     # Public API
